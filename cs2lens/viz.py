@@ -72,7 +72,7 @@ def _round_ticks(m: Match, round_num: int, step_sec: float) -> tuple[list[int], 
         raise ValueError(f"round {round_num} not found (knife rounds are excluded)")
     info = row.row(0, named=True)
     step = max(1, round(step_sec * m.tick_rate / m.snap_step)) * m.snap_step
-    first = -(-info["freeze_end_tick"] // m.snap_step) * m.snap_step
+    first = m.snap_floor(info["freeze_end_tick"] + m.snap_step - 1)
     return list(range(first, info["end_tick"] + 1, step)), info
 
 

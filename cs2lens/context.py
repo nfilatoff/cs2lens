@@ -39,6 +39,11 @@ class Match:
     sides: pl.DataFrame  # round_num, team, side
     tr: pl.DataFrame  # one row per (round, team): side, won, buy, equip, opp, opp_buy, opp_equip
     snap_step: int  # ticks between snapshots
+    snap_offset: int = 0  # snapshot ticks are snap_offset + k * snap_step (some demos start at tick 1)
+
+    def snap_floor(self, tick):
+        """The snapshot tick at or before ``tick`` (int or polars expression)."""
+        return (tick - self.snap_offset) // self.snap_step * self.snap_step + self.snap_offset
 
     def event(self, name: str) -> pl.DataFrame | None:
         path = self.directory / "events" / f"{name}.parquet"
@@ -108,4 +113,5 @@ def load_match(directory: str | Path, extra_tables: tuple[str, ...] = ()) -> Mat
         sides=sides,
         tr=tr,
         snap_step=snap_step,
+        snap_offset=int(ticks.min()) % snap_step,
     )

@@ -96,8 +96,7 @@ def utility_events(m: Match, userids: pl.DataFrame) -> pl.DataFrame:
 
 def _positions_at(m: Match, rounds_ticks: pl.DataFrame) -> pl.DataFrame:
     """Living players at a per-round tick. ``rounds_ticks`` has ``round_num`` and ``at_tick``."""
-    step = m.snap_step
-    snap_ticks = rounds_ticks.select("round_num", snap_tick=(pl.col("at_tick") // step) * step)
+    snap_ticks = rounds_ticks.select("round_num", snap_tick=m.snap_floor(pl.col("at_tick")))
     return (
         m.data["snapshots"]
         .select("tick", "steamid", "side", "x", "y", "z", "health")
