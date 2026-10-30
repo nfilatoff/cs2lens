@@ -181,5 +181,24 @@ def maps_derive(demos: list[Path], output: Path | None = None) -> None:
     typer.echo(f"{path}: {len(cfg['sites'])} site polygons, {len({z['name'] for z in cfg['zones']})} zones")
 
 
+@app.command("app")
+def app_cmd(out: Path = Path("out"), host: str = "127.0.0.1", port: int = 8000, open_browser: bool = True) -> None:
+    """Run the web app (library, match pages, 2D replay) at http://HOST:PORT."""
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    from cs2lens.app.server import STATIC_DIR, create_app
+
+    if not STATIC_DIR.exists():
+        typer.echo("frontend is not built yet: cd frontend && npm install && npm run build", err=True)
+    url = f"http://{host}:{port}/"
+    if open_browser:
+        threading.Timer(1.0, webbrowser.open, args=(url,)).start()
+    typer.echo(f"cs2lens app on {url} (data in {out.resolve()})")
+    uvicorn.run(create_app(out), host=host, port=port, log_level="warning")
+
+
 if __name__ == "__main__":
     app()

@@ -3,7 +3,7 @@ name = "cs2lens"
 version = "0.1.0"
 description = "CS2 demo analyzer built on awpy 3"
 requires-python = ">=3.11"
-dependencies = ["awpy>=3.1", "polars", "matplotlib", "typer"]
+dependencies = ["awpy>=3.1", "polars", "matplotlib", "typer", "fastapi", "uvicorn"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -16,10 +16,11 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["cs2lens", "cs2lens.maps"]
+packages = ["cs2lens", "cs2lens.maps", "cs2lens.app"]
 
 [tool.setuptools.package-data]
 "cs2lens.maps" = ["*.json"]
+"cs2lens.app" = ["static/*", "static/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
