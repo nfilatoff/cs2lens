@@ -1,0 +1,29 @@
+{
+  "map": "de_cache",
+  "source": "manual: drawn by hand over the awpy radar with a world-coordinate grid; sites follow the bomb-site outlines printed on the radar. Not checked against demos yet: rebuild with `cs2lens maps derive` once demos of this map are available.",
+  "levels": [
+    {"name": "default", "z_min": -1000000000.0, "z_max": 1000000000.0, "radar": "de_cache"}
+  ],
+  "sites": [
+    {"site": "A", "level": "default", "polygon": [[-400, 1450], [-30, 1450], [-30, 2050], [-400, 2050]]},
+    {"site": "B", "level": "default", "polygon": [[-330, -1550], [230, -1550], [230, -1050], [-330, -1050]]}
+  ],
+  "zones": [
+    {"name": "A Site", "group": "A", "level": "default", "polygon": [[-450, 1400], [-130, 1400], [-130, 1250], [500, 1250], [500, 2280], [-450, 2280]]},
+    {"name": "Highway", "group": "A", "level": "default", "polygon": [[-1100, 550], [-100, 550], [-100, 1450], [-1100, 1450]]},
+    {"name": "A Main", "group": "A_approach", "level": "default", "polygon": [[100, 2050], [1050, 2050], [1050, 2280], [100, 2280]]},
+    {"name": "A Main", "group": "A_approach", "level": "default", "polygon": [[850, 1000], [1350, 1000], [1350, 2050], [850, 2050]]},
+    {"name": "A Main", "group": "A_approach", "level": "default", "polygon": [[1350, 450], [2300, 450], [2300, 1000], [1350, 1000]]},
+    {"name": "A Connector", "group": "A_approach", "level": "default", "polygon": [[500, 600], [850, 600], [850, 2050], [500, 2050]]},
+    {"name": "Mid", "group": "mid", "level": "default", "polygon": [[-1100, -50], [800, -50], [800, 550], [-1100, 550]]},
+    {"name": "Garage", "group": "mid", "level": "default", "polygon": [[800, -150], [1700, -150], [1700, 550], [800, 550]]},
+    {"name": "Top of Mid", "group": "mid", "level": "default", "polygon": [[1700, -250], [2300, -250], [2300, 450], [1700, 450]]},
+    {"name": "B Site", "group": "B", "level": "default", "polygon": [[-350, -1600], [450, -1600], [450, -700], [-350, -700]]},
+    {"name": "B Connector", "group": "B", "level": "default", "polygon": [[-300, -700], [700, -700], [700, -50], [-300, -50]]},
+    {"name": "Checkers", "group": "B", "level": "default", "polygon": [[-1100, -1050], [-350, -1050], [-350, -50], [-1100, -50]]},
+    {"name": "B Halls", "group": "B_approach", "level": "default", "polygon": [[450, -1500], [1650, -1500], [1650, -500], [450, -500]]},
+    {"name": "B Main", "group": "B_approach", "level": "default", "polygon": [[1650, -1150], [2550, -1150], [2550, -450], [1650, -450]]},
+    {"name": "CT Spawn", "group": "ct_spawn", "level": "default", "polygon": [[-1850, -300], [-1100, -300], [-1100, 1100], [-1850, 1100]]},
+    {"name": "T Spawn", "group": "t_spawn", "level": "default", "polygon": [[2300, -450], [3350, -450], [3350, 450], [2300, 450]]}
+  ]
+}

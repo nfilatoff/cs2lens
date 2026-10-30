@@ -1,0 +1,29 @@
+{
+  "map": "de_nuke",
+  "source": "manual: drawn by hand over the awpy radar with a world-coordinate grid; sites follow the bomb-site outlines printed on the radar. Not checked against demos yet: rebuild with `cs2lens maps derive` once demos of this map are available.",
+  "levels": [
+    {"name": "default", "z_min": -495.0, "z_max": 1000000000.0, "radar": "de_nuke"},
+    {"name": "lower", "z_min": -1000000000.0, "z_max": -495.0, "radar": "de_nuke_lower"}
+  ],
+  "sites": [
+    {"site": "A", "level": "default", "polygon": [[500, -950], [870, -950], [870, -550], [500, -550]]},
+    {"site": "B", "level": "lower", "polygon": [[400, -1250], [870, -1250], [870, -720], [400, -720]]}
+  ],
+  "zones": [
+    {"name": "T Spawn", "group": "t_spawn", "level": "default", "polygon": [[-3050, -1300], [-1300, -1300], [-1300, -550], [-3050, -550]]},
+    {"name": "Lobby", "group": "A_approach", "level": "default", "polygon": [[-1300, -1300], [-450, -1300], [-450, -300], [-1300, -300]]},
+    {"name": "A Main", "group": "A_approach", "level": "default", "polygon": [[-450, -1400], [300, -1400], [300, -300], [-450, -300]]},
+    {"name": "A Site", "group": "A", "level": "default", "polygon": [[300, -1450], [1000, -1450], [1000, -300], [300, -300]]},
+    {"name": "Hut", "group": "A", "level": "default", "polygon": [[450, -1850], [850, -1850], [850, -1450], [450, -1450]]},
+    {"name": "Heaven", "group": "A", "level": "default", "polygon": [[1000, -1000], [1600, -1000], [1600, -300], [1000, -300]]},
+    {"name": "Ramp", "group": "B_approach", "level": "default", "polygon": [[250, -300], [1000, -300], [1000, 920], [250, 920]]},
+    {"name": "Outside", "group": "mid", "level": "default", "polygon": [[-650, -1000], [-150, -2250], [800, -2500], [1300, -2500], [1300, -1600], [2000, -1600], [2000, -1000], [1000, -1000], [1000, -1450], [-450, -1450], [-450, -1000]]},
+    {"name": "Secret", "group": "B_approach", "level": "default", "polygon": [[1300, -2450], [2100, -2450], [2100, -1600], [1300, -1600]]},
+    {"name": "CT Spawn", "group": "ct_spawn", "level": "default", "polygon": [[1600, -1000], [3550, -1000], [3550, -250], [1600, -250]]},
+    {"name": "Ramp", "group": "B_approach", "level": "lower", "polygon": [[300, -200], [1000, -200], [1000, 920], [300, 920]]},
+    {"name": "B Site", "group": "B", "level": "lower", "polygon": [[300, -1500], [1000, -1500], [1000, -200], [300, -200]]},
+    {"name": "Lower Tunnels", "group": "B_approach", "level": "lower", "polygon": [[0, -1850], [1000, -1850], [1000, -1500], [0, -1500]]},
+    {"name": "Secret", "group": "B_approach", "level": "lower", "polygon": [[1000, -2450], [1800, -2450], [1800, -1700], [1000, -1700]]},
+    {"name": "Decon", "group": "B", "level": "lower", "polygon": [[1000, -1700], [1500, -1700], [1500, -400], [1000, -400]]}
+  ]
+}
