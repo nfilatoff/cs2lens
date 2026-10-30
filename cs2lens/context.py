@@ -58,6 +58,10 @@ def load_match(directory: str | Path, extra_tables: tuple[str, ...] = ()) -> Mat
         raise FileNotFoundError(f"{directory}: missing {missing}; run `cs2lens extract` first")
     data = {t: pl.read_parquet(directory / f"{t}.parquet") for t in names}
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    # Coaches have a stats row (no kills, deaths, assists or damage) and a pawn on their team.
+    data["stats"] = data["stats"].filter(
+        (pl.col("kills") + pl.col("deaths") + pl.col("assists") > 0) | (pl.col("adr").cast(pl.Float64) > 0)
+    )
 
     # Ticks inside a knife round fall past the previous round's end_tick and are dropped by with_round.
     rounds = (
@@ -79,6 +83,8 @@ def load_match(directory: str | Path, extra_tables: tuple[str, ...] = ()) -> Mat
         .filter((pl.col("steamid") != 0) & pl.col("team_clan_name").is_not_null())
         .select("steamid", team=pl.col("team_clan_name"))
     )
+    if data["stats"].height:
+        teams = teams.filter(pl.col("steamid").is_in(data["stats"]["steamid"].implode()))
 
     # Which side each team played in each round (snapshots, majority vote).
     snaps = with_round(data["snapshots"].select("tick", "steamid", "side"), rounds).join(teams, on="steamid")

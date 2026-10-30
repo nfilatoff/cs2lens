@@ -48,6 +48,25 @@ def test_snapshot_offset(dust2_mini):
     assert m.snap_floor(20000) in snap_ticks
 
 
+def test_coach_is_not_a_player(dust2_mini, tmp_path):
+    from cs2lens.team_stats import team_stats
+
+    d = tmp_path / "m"
+    shutil.copytree(dust2_mini, d)
+    before = team_stats(d)["summary"].select("team", "adr", "kast").sort("team")
+    stats = pl.read_parquet(d / "stats.parquet")
+    coach = stats.head(1).with_columns(
+        pl.lit(1, pl.UInt64).alias("steamid"), pl.lit("").alias("name"),
+        *[pl.lit(0).cast(stats.schema[c]).alias(c) for c in ("kills", "deaths", "assists", "adr", "kast")],
+    )
+    pl.concat([stats, coach]).write_parquet(d / "stats.parquet")
+    players = pl.read_parquet(d / "players.parquet")
+    pl.concat([players, players.head(1).with_columns(pl.lit(1, pl.UInt64).alias("steamid"))]).write_parquet(d / "players.parquet")
+    m = load_match(d)
+    assert 1 not in m.teams["steamid"].to_list()
+    assert team_stats(d)["summary"].select("team", "adr", "kast").sort("team").equals(before)
+
+
 def test_missing_first_round_start_is_filled(dust2_mini, tmp_path):
     d = tmp_path / "m"
     shutil.copytree(dust2_mini, d)
