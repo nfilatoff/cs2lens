@@ -41,7 +41,8 @@ _TACTICS_SECTIONS = [
 def tactics_markdown(tables: dict[str, pl.DataFrame], title: str) -> str:
     tables = dict(tables)
     tables["rounds_t"] = tables["rounds_t"].select(
-        "team", "round_num", "target_site", "exec_sec", "plant_sec", "tempo", "package", "won"
+        "team", "round_num", "target_site", "exec_sec", "plant_sec", "tempo", "package", "won",
+        *[c for c in ("entry", "package_zones") if c in tables["rounds_t"].columns],
     )
     tables["setup_summary"] = (
         tables["setups"]

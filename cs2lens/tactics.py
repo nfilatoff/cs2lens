@@ -1,21 +1,26 @@
 """Tactical analysis: T executes, CT setups and CT rotations.
 
-Bomb sites are not hard-coded per map: their centres are the mean plant positions
-seen in the demo, so every distance threshold is relative to the A-B distance.
-Both sites therefore need at least one plant in the demo.
+Positions are classified with the map config (``cs2lens.maps``): a point belongs to
+site A when it is inside a zone of group ``A`` (the site and the CT positions around
+it), and so on. Maps without a config fall back to a heuristic: site centres are the
+mean plant positions in the demo (so both sites need a plant) and every radius is a
+fraction of the A-B distance. A warning is issued when the fallback is used.
 """
 
 from __future__ import annotations
 
 import math
+import warnings
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from cs2lens.context import Match, load_match, pct, with_round
+from cs2lens.maps import MapConfig, load_map_config
 
-SITE_RADIUS = 0.20  # "on the site" radius, as a fraction of the A-B distance
-DEFEND_RADIUS = 0.40  # a CT closer than this to a site counts as holding it, else "mid"
+SITE_RADIUS = 0.20  # fallback only: "on the site" radius, as a fraction of the A-B distance
+DEFEND_RADIUS = 0.40  # fallback only: a CT closer than this to a site counts as holding it, else "mid"
 SETUP_SEC = 15.0  # CT setup is sampled this long after freeze end (or at first contact if earlier)
 EARLY_SEC = 30.0  # execute start (first T utility on the target site) before this: early; at or after LATE_SEC: late
 LATE_SEC = 60.0
@@ -38,8 +43,73 @@ def _site_centers(m: Match) -> dict[str, tuple[float, float]]:
     return found
 
 
-def _site_dist(x: pl.Expr, y: pl.Expr, site: tuple[float, float]) -> pl.Expr:
-    return ((x - site[0]) ** 2 + (y - site[1]) ** 2).sqrt()
+class SiteZoner:
+    """Classifies positions relative to the bomb sites.
+
+    Uses the map config when it has both sites, else the plant-centre heuristic.
+    Every method takes a frame with ``x``, ``y`` (and ``z`` when available) and returns a Series.
+    """
+
+    def __init__(self, m: Match):
+        cfg = load_map_config(m.map_name)
+        if cfg is not None and {s.name for s in cfg.sites} >= {"A", "B"}:
+            self.cfg: MapConfig | None = cfg
+            self.centers = cfg.site_centers()
+        else:
+            warnings.warn(
+                f"{m.map_name}: no map config, using the plant-centre heuristic for sites (tuned on de_anubis)",
+                stacklevel=2,
+            )
+            self.cfg = None
+            self.centers = _site_centers(m)
+            d_ab = math.dist(self.centers["A"], self.centers["B"])
+            self.site_r, self.defend_r = SITE_RADIUS * d_ab, DEFEND_RADIUS * d_ab
+
+    @staticmethod
+    def _xyz(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+        z = df["z"].cast(pl.Float64).to_numpy() if "z" in df.columns else None
+        return df["x"].cast(pl.Float64).to_numpy(), df["y"].cast(pl.Float64).to_numpy(), z
+
+    def _dists(self, df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        x, y, _ = self._xyz(df)
+        (ax, ay), (bx, by) = self.centers["A"], self.centers["B"]
+        return np.hypot(x - ax, y - ay), np.hypot(x - bx, y - by)
+
+    def _groups(self, df: pl.DataFrame) -> np.ndarray:
+        return np.array(self.cfg.group_of(*self._xyz(df)), dtype=object)
+
+    def zone_names(self, df: pl.DataFrame) -> pl.Series:
+        """Callout name for each row (``None`` without a config)."""
+        if self.cfg is None or df.is_empty():
+            return pl.Series("zone_name", [None] * df.height, dtype=pl.String)
+        return pl.Series("zone_name", self.cfg.zone_of(*self._xyz(df)), dtype=pl.String)
+
+    def site_area(self, df: pl.DataFrame) -> pl.Series:
+        """``A``/``B`` when the point is on a site or a CT position around it, else ``None``.
+
+        With a config, CT spawn counts for the nearer site (CT smokes in executes).
+        """
+        if df.is_empty():
+            return pl.Series("site_area", [], dtype=pl.String)
+        da, db = self._dists(df)
+        if self.cfg is None:
+            out = np.where(da <= self.site_r, "A", np.where(db <= self.site_r, "B", None))
+        else:
+            g = self._groups(df)
+            out = np.where(np.isin(g, ["A", "B"]), g, np.where(g == "ct_spawn", np.where(da <= db, "A", "B"), None))
+        return pl.Series("site_area", out.tolist(), dtype=pl.String)
+
+    def holding(self, df: pl.DataFrame) -> pl.Series:
+        """Where a CT plays: ``A``/``B`` (the site, around it or pushed into its approach), else ``M``."""
+        if df.is_empty():
+            return pl.Series("zone", [], dtype=pl.String)
+        if self.cfg is None:
+            da, db = self._dists(df)
+            out = np.where(np.minimum(da, db) > self.defend_r, "M", np.where(da <= db, "A", "B"))
+        else:
+            g = self._groups(df)
+            out = np.where(np.isin(g, ["A", "A_approach"]), "A", np.where(np.isin(g, ["B", "B_approach"]), "B", "M"))
+        return pl.Series("zone", out.tolist(), dtype=pl.String)
 
 
 def userid_map(m: Match) -> pl.DataFrame:
@@ -52,7 +122,7 @@ def userid_map(m: Match) -> pl.DataFrame:
 
 
 def utility_events(m: Match, userids: pl.DataFrame) -> pl.DataFrame:
-    """Every landed grenade: round, seconds since freeze end, type, position, thrower team and side."""
+    """Every landed grenade: round, seconds since freeze end, type, position (x, y, z), thrower team and side."""
     parts = []
     for name, kind in _UTIL_EVENTS:
         ev = m.event(name)
@@ -64,6 +134,7 @@ def utility_events(m: Match, userids: pl.DataFrame) -> pl.DataFrame:
                     type=pl.lit(kind),
                     x=pl.col("x").cast(pl.Float64),
                     y=pl.col("y").cast(pl.Float64),
+                    z=pl.col("z").cast(pl.Float64),
                 )
             )
 
@@ -83,9 +154,9 @@ def utility_events(m: Match, userids: pl.DataFrame) -> pl.DataFrame:
             if cands:
                 i = cands[-1]
                 used.add(i)
-                rows.append((fire["start_tick"], throws[i][1], "molotov", float(fire["x"]), float(fire["y"])))
+                rows.append((fire["start_tick"], throws[i][1], "molotov", float(fire["x"]), float(fire["y"]), float(fire["z"])))
         if rows:
-            parts.append(pl.DataFrame(rows, schema=["tick", "userid", "type", "x", "y"], orient="row"))
+            parts.append(pl.DataFrame(rows, schema=["tick", "userid", "type", "x", "y", "z"], orient="row"))
 
     util = pl.concat(
         [p.with_columns(pl.col("tick").cast(pl.Int32)) for p in parts]
@@ -107,6 +178,37 @@ def _positions_at(m: Match, rounds_ticks: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _package_zones(package_util: pl.DataFrame) -> pl.DataFrame:
+    """Per round, the callouts the execute utility landed in: ``smoke: CT Spawn, Jungle; flash: A Site``."""
+    return (
+        package_util.filter(pl.col("zone_name").is_not_null())
+        .group_by("round_num", "type")
+        .agg(pl.col("zone_name").unique().sort().str.join(", "))
+        .sort("round_num", "type")
+        .group_by("round_num", maintain_order=True)
+        .agg(package_zones=pl.format("{}: {}", "type", "zone_name").str.join("; "))
+    )
+
+
+def _entry(m: Match, zoner: SiteZoner, t_rounds: pl.DataFrame, rate: float) -> pl.DataFrame:
+    """Per round, where the living Ts were when the execute started: ``A Main 3, Palace Interior 2``.
+
+    Without an execute start the reference is ``PACKAGE_SEC`` before the plant.
+    """
+    ref = t_rounds.select(
+        "round_num", at_tick=pl.coalesce("exec_tick", (pl.col("plant_tick") - int(PACKAGE_SEC * rate)).cast(pl.Int32))
+    ).filter(pl.col("at_tick").is_not_null())
+    pos = _positions_at(m, ref).filter(pl.col("side") == "terrorist")
+    pos = pos.with_columns(zoner.zone_names(pos)).filter(pl.col("zone_name").is_not_null())
+    return (
+        pos.group_by("round_num", "zone_name")
+        .len()
+        .sort("round_num", "len", "zone_name", descending=[False, True, False])
+        .group_by("round_num", maintain_order=True)
+        .agg(entry=pl.format("{} {}", "zone_name", "len").str.join(", "))
+    )
+
+
 def tactics(directory: str | Path) -> dict[str, pl.DataFrame]:
     """Compute tactical tables.
 
@@ -114,17 +216,11 @@ def tactics(directory: str | Path) -> dict[str, pl.DataFrame]:
     ``setups`` (CT setups with round results) and ``rotations`` (per CT team).
     """
     m = load_match(directory, extra_tables=("damages", "fires", "shots"))
-    sites = _site_centers(m)
-    d_ab = math.dist(sites["A"], sites["B"])
-    site_r, defend_r = SITE_RADIUS * d_ab, DEFEND_RADIUS * d_ab
+    zoner = SiteZoner(m)
     rate = m.tick_rate
 
     util = utility_events(m, userid_map(m))
-    util = util.with_columns(
-        dA=_site_dist(pl.col("x"), pl.col("y"), sites["A"]), dB=_site_dist(pl.col("x"), pl.col("y"), sites["B"])
-    ).with_columns(
-        zone=pl.when(pl.col("dA") <= site_r).then(pl.lit("A")).when(pl.col("dB") <= site_r).then(pl.lit("B")).otherwise(pl.lit("other"))
-    )
+    util = util.with_columns(zoner.site_area(util).fill_null("other").alias("zone"), zoner.zone_names(util))
 
     # Plants, first contact (first cross-side damage) and the teams per round.
     bomb = with_round(m.data["bomb"].select("tick", "event", "bombsite"), m.rounds)
@@ -172,13 +268,13 @@ def tactics(directory: str | Path) -> dict[str, pl.DataFrame]:
     )
 
     # Execute package: utility landed on the planted site from the execute start up to the plant.
+    package_util = t_util.join(t_rounds.select("round_num", "plant_site", "exec_tick"), on="round_num").filter(
+        (pl.col("zone") == pl.col("plant_site"))
+        & (pl.col("tick") >= pl.col("exec_tick"))
+        & (pl.col("tick") <= pl.col("plant_tick"))
+    )
     package = (
-        t_util.join(t_rounds.select("round_num", "plant_site", "exec_tick"), on="round_num")
-        .filter(
-            (pl.col("zone") == pl.col("plant_site"))
-            & (pl.col("tick") >= pl.col("exec_tick"))
-            & (pl.col("tick") <= pl.col("plant_tick"))
-        )
+        package_util
         .group_by("round_num")
         .agg(
             smokes=(pl.col("type") == "smoke").sum(),
@@ -192,6 +288,9 @@ def tactics(directory: str | Path) -> dict[str, pl.DataFrame]:
     ).with_columns(
         pl.when(pl.col("plant_site").is_null()).then(None)
         .otherwise(pl.format("{}s {}f {}m {}h", "smokes", "flashes", "mollies", "hes")).alias("package")
+    )
+    t_rounds = t_rounds.join(_package_zones(package_util), on="round_num", how="left").join(
+        _entry(m, zoner, t_rounds, rate), on="round_num", how="left"
     ).sort("team", "round_num")
 
     executes = (
@@ -223,12 +322,8 @@ def tactics(directory: str | Path) -> dict[str, pl.DataFrame]:
         at_tick=pl.min_horizontal(pl.col("freeze_end_tick") + int(SETUP_SEC * rate), pl.col("contact_tick").fill_null(10**9)).cast(pl.Int32)
     )
     pos = _positions_at(m, ct_rounds.select("round_num", "at_tick"))
-    pos = pos.filter(pl.col("side") == "counter-terrorist").with_columns(
-        dA=_site_dist(pl.col("x"), pl.col("y"), sites["A"]), dB=_site_dist(pl.col("x"), pl.col("y"), sites["B"])
-    ).with_columns(
-        zone=pl.when(pl.min_horizontal("dA", "dB") > defend_r).then(pl.lit("M"))
-        .when(pl.col("dA") <= pl.col("dB")).then(pl.lit("A")).otherwise(pl.lit("B"))
-    )
+    pos = pos.filter(pl.col("side") == "counter-terrorist")
+    pos = pos.with_columns(zoner.holding(pos))
     counts = pos.group_by("round_num").agg(
         a=(pl.col("zone") == "A").sum(), b=(pl.col("zone") == "B").sum(), mid=(pl.col("zone") == "M").sum()
     )
@@ -246,25 +341,19 @@ def tactics(directory: str | Path) -> dict[str, pl.DataFrame]:
         .with_columns(ref_tick=pl.coalesce("exec_tick", (pl.col("plant_tick") - int(PACKAGE_SEC * rate)).cast(pl.Int32)))
     )
     at_contact = _positions_at(m, rot_rounds.select("round_num", at_tick=pl.col("ref_tick"))).filter(pl.col("side") == "counter-terrorist")
-    at_contact = at_contact.join(rot_rounds.select("round_num", "plant_site", "ref_tick", "plant_tick"), on="round_num").with_columns(
-        d_site=pl.when(pl.col("plant_site") == "A")
-        .then(_site_dist(pl.col("x"), pl.col("y"), sites["A"]))
-        .otherwise(_site_dist(pl.col("x"), pl.col("y"), sites["B"]))
+    at_contact = at_contact.join(rot_rounds.select("round_num", "plant_site", "ref_tick", "plant_tick"), on="round_num")
+    at_contact = at_contact.with_columns(zoner.site_area(at_contact))
+    rotators = at_contact.filter(pl.col("site_area").is_null() | (pl.col("site_area") != pl.col("plant_site"))).select(
+        "round_num", "steamid", "team", "plant_site", "ref_tick", "plant_tick"
     )
-    rotators = at_contact.filter(pl.col("d_site") > site_r).select("round_num", "steamid", "team", "plant_site", "ref_tick", "plant_tick")
     later = (
-        m.data["snapshots"].select("tick", "steamid", "x", "y", "health").filter(pl.col("health") > 0)
+        m.data["snapshots"].select("tick", "steamid", "x", "y", "z", "health").filter(pl.col("health") > 0)
         .with_columns(pl.col("x").cast(pl.Float64), pl.col("y").cast(pl.Float64))
     )
+    arrivals = rotators.join(later, on="steamid").filter(pl.col("tick") > pl.col("ref_tick"))
     arrivals = (
-        rotators.join(later, on="steamid")
-        .filter(pl.col("tick") > pl.col("ref_tick"))
-        .with_columns(
-            d_site=pl.when(pl.col("plant_site") == "A")
-            .then(_site_dist(pl.col("x"), pl.col("y"), sites["A"]))
-            .otherwise(_site_dist(pl.col("x"), pl.col("y"), sites["B"]))
-        )
-        .filter(pl.col("d_site") <= site_r)
+        arrivals.with_columns(zoner.site_area(arrivals))
+        .filter(pl.col("site_area") == pl.col("plant_site"))
         .join(m.rounds.select("round_num", "end_tick"), on="round_num")
         .filter(pl.col("tick") <= pl.col("end_tick"))
         .group_by("round_num", "steamid")
