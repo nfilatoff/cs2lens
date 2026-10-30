@@ -15,7 +15,7 @@ from pathlib import Path
 
 import polars as pl
 
-TABLES = ["rounds", "kills", "bomb", "players", "stats", "round_economy", "snapshots", "damages", "fires", "smokes", "shots", "blinds"]
+TABLES = ["rounds", "kills", "bomb", "players", "stats", "round_economy", "snapshots", "damages", "fires", "smokes", "shots", "blinds", "grenades"]
 EVENTS = ["weapon_fire", "smokegrenade_detonate", "flashbang_detonate", "hegrenade_detonate", "grenade_thrown"]
 SNAP_COLUMNS = ["tick", "steamid", "name", "side", "x", "y", "z", "yaw", "health", "armor", "has_bomb", "active_weapon"]
 
