@@ -135,5 +135,51 @@ def viz_gif(source: Path, round_num: int, step_sec: float = 0.5, fps: int = 4, o
     typer.echo(viz.round_gif(d, d / "viz" / f"round{round_num}.gif", round_num=round_num, step_sec=step_sec, fps=fps))
 
 
+@viz_app.command("zones")
+def viz_zones(map_name: str, out: Path = Path("out")) -> None:
+    """Draw a map config (sites, callout zones) over the radar, with plants from extracts in OUT."""
+    import json
+
+    import polars as pl
+
+    from cs2lens import viz
+
+    plants = []
+    for manifest in out.glob("*/manifest.json"):
+        if json.loads(manifest.read_text(encoding="utf-8"))["header"].get("map_name") == map_name:
+            bomb = pl.read_parquet(manifest.parent / "bomb.parquet")
+            plants.append(bomb.filter(pl.col("event") == "finish_plant").select("x", "y", "z", "bombsite"))
+    df = pl.concat(plants) if plants else None
+    typer.echo(viz.zones_map(map_name, out / "maps" / f"{map_name}_zones.png", plants=df))
+
+
+maps_app = typer.Typer(help="Map configs (bomb sites, callout zones, levels)", no_args_is_help=True)
+app.add_typer(maps_app, name="maps")
+
+
+@maps_app.command("list")
+def maps_list() -> None:
+    """Maps with a config, their levels and zone counts."""
+    from cs2lens.maps import available_maps, load_map_config
+
+    for name in available_maps():
+        cfg = load_map_config(name)
+        ungrouped = sorted({z.name for z in cfg.zones if not z.group})
+        typer.echo(
+            f"{name:12s} levels={len(cfg.levels)} sites={sorted({s.name for s in cfg.sites})} "
+            f"zones={len({z.name for z in cfg.zones})}" + (f" ungrouped={ungrouped}" if ungrouped else "")
+        )
+
+
+@maps_app.command("derive")
+def maps_derive(demos: list[Path], output: Path | None = None) -> None:
+    """Build (or rebuild) a map config from .dem files of one map; zone groups are kept."""
+    from cs2lens.mapgen import derive, write_config
+
+    cfg = derive(demos)
+    path = write_config(cfg, output)
+    typer.echo(f"{path}: {len(cfg['sites'])} site polygons, {len({z['name'] for z in cfg['zones']})} zones")
+
+
 if __name__ == "__main__":
     app()
