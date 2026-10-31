@@ -9,6 +9,7 @@ export interface LibraryMatch {
   map: string;
   has_replay: boolean;
   modified: number;
+  busy: boolean;
   score?: Record<string, number>;
   rounds?: number;
   error?: string;
@@ -18,6 +19,9 @@ export interface LibraryDemo {
   path: string;
   name: string;
   size_mb: number;
+  map: string | null;
+  match_id: string;
+  uploaded: boolean;
   extracted: boolean;
   job: number | null;
 }
@@ -31,7 +35,7 @@ export interface Library {
 
 export interface Job {
   id: number;
-  kind: "extract" | "replay";
+  kind: "extract" | "replay" | "unpack";
   target: string;
   match_id: string;
   status: "queued" | "running" | "done" | "error";
@@ -113,6 +117,7 @@ export interface ReplayPlayer {
   weapon: number[];
   defusing: number[] | null;
   money: number | null;
+  inv: [number, number][] | null; // [tick, index into Replay.items] at every inventory change
 }
 
 export interface ReplayGrenade {
@@ -155,6 +160,16 @@ export interface ReplayKill {
   vx: number;
   vy: number;
   vz: number;
+  assister_name: string | null;
+  hitgroup: string | null;
+  trade: boolean;
+  traded: boolean;
+  dist: number | null; // world units
+  attacker_hp: number | null;
+  victim_weapon: string | null;
+  given: [number, number]; // [hits, damage] killer -> victim this round
+  taken: [number, number]; // [hits, damage] victim -> killer this round
+  duel_start: number | null; // tick of the first hit between the two
 }
 
 export interface ReplayBombEvent {
@@ -183,6 +198,7 @@ export interface Replay {
   ticks: number[];
   teams: Partial<Record<Side, string>>;
   weapons: string[];
+  items: (string | null)[][]; // inventories: [primary, secondary, ...grenades]
   players: ReplayPlayer[];
   grenades: ReplayGrenade[];
   smokes: ReplayArea[];
@@ -190,7 +206,8 @@ export interface Replay {
   blinds: { tick: number; attacker: string; victim: string; duration: number }[];
   kills: ReplayKill[];
   bomb: ReplayBombEvent[];
-  shots: { tick: number[]; player: string[] };
+  // gun shots: shooter position and view yaw; hx/hy is the victim's position when the shot hit
+  shots: { tick: number[]; player: string[]; x: number[]; y: number[]; yaw: number[]; hx: (number | null)[]; hy: (number | null)[] };
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -220,8 +237,28 @@ export const api = {
   removeFolder: (path: string) =>
     request<{ folders: string[] }>(`/api/library/folders?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
   extract: (path: string) => request<{ job: number }>("/api/extract", json({ path })),
-  upload: (file: File) =>
-    request<{ job: number }>(`/api/upload?name=${encodeURIComponent(file.name)}`, { method: "PUT", body: file }),
+  upload: (file: File, onProgress?: (loaded: number) => void) =>
+    new Promise<{ job: number | null; name: string }>((resolve, reject) => {
+      // XHR rather than fetch: only XHR reports upload progress.
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", `/api/upload?name=${encodeURIComponent(file.name)}`);
+      xhr.upload.onprogress = (e) => onProgress?.(e.loaded);
+      xhr.onload = () => {
+        let body: { detail?: string } = {};
+        try {
+          body = JSON.parse(xhr.responseText);
+        } catch {
+          /* not JSON */
+        }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(body as { job: number | null; name: string });
+        else reject(new Error(`${xhr.status}: ${body.detail ?? xhr.statusText}`));
+      };
+      xhr.onerror = () => reject(new Error(`${file.name}: соединение прервано`));
+      xhr.send(file);
+    }),
+  deleteMatch: (id: string, demo: boolean) =>
+    request<{ deleted: string; demo: string | null }>(`${m(id)}?demo=${demo}`, { method: "DELETE" }),
+  deleteDemo: (path: string) => request<{ deleted: string }>(`/api/demos?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
   jobs: () => request<Job[]>("/api/jobs"),
   buildReplayData: (id: string) => request<{ job: number }>(`${m(id)}/replay-data`, { method: "POST" }),
   match: (id: string) => request<MatchOverview>(m(id)),

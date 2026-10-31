@@ -4,6 +4,7 @@ import { go } from "../App";
 import { DataTable } from "../components/DataTable";
 import { ReplayView } from "../components/Replay";
 import { MapsView } from "../components/MapsView";
+import { ClipView } from "../components/ClipView";
 import { sideColor, sideShort } from "../radar";
 
 const TABS: [string, string][] = [
@@ -12,6 +13,7 @@ const TABS: [string, string][] = [
   ["tactics", "Тактика"],
   ["replay", "2D-реплей"],
   ["maps", "Карты"],
+  ["clip", "Клип (GIF/видео)"],
 ];
 
 export const REASONS: Record<string, string> = {
@@ -70,6 +72,7 @@ export function MatchPage({ id, tab, round, at }: { id: string; tab: string; rou
       {tab === "tactics" && <Tactics id={id} />}
       {tab === "replay" && <ReplayView match={match} round={round ?? match.timeline[0]?.round ?? 1} at={at} />}
       {tab === "maps" && <MapsView match={match} />}
+      {tab === "clip" && <ClipView match={match} />}
     </div>
   );
 }

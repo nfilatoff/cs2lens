@@ -9,6 +9,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "gifenc": "^1.0.3",
+    "mp4-muxer": "^5.2.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },

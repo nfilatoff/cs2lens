@@ -3,7 +3,7 @@ name = "cs2lens"
 version = "0.1.0"
 description = "CS2 demo analyzer built on awpy 3"
 requires-python = ">=3.11"
-dependencies = ["awpy>=3.1", "polars", "matplotlib", "typer", "fastapi", "uvicorn"]
+dependencies = ["awpy>=3.1", "polars", "matplotlib", "typer", "fastapi", "uvicorn", "zstandard; python_version < '3.14'"]
 
 [project.optional-dependencies]
 dev = ["pytest"]

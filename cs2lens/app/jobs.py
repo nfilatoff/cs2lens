@@ -14,8 +14,8 @@ from queue import Queue
 @dataclass
 class Job:
     id: int
-    kind: str  # "extract" | "replay"
-    target: str  # demo path
+    kind: str  # "extract" | "replay" | "unpack"
+    target: str  # demo or archive path
     match_id: str
     status: str = "queued"  # queued | running | done | error
     progress: float = 0.0
@@ -48,6 +48,13 @@ class JobQueue:
         with self._lock:
             for job in self._jobs.values():
                 if job.target == target and job.status in ("queued", "running"):
+                    return job
+        return None
+
+    def active_for_match(self, match_id: str) -> Job | None:
+        with self._lock:
+            for job in self._jobs.values():
+                if job.match_id == match_id and job.status in ("queued", "running"):
                     return job
         return None
 

@@ -9,17 +9,20 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import warnings
 from functools import lru_cache
 from pathlib import Path
 
 import polars as pl
+from awpy import Demo
 from awpy import data as awpy_data
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from cs2lens.aggregate import aggregate
+from cs2lens.app.archives import is_archive, unpack
 from cs2lens.app.jobs import JobQueue
 from cs2lens.context import load_match, with_round
 from cs2lens.extract import add_replay, extract
@@ -30,6 +33,7 @@ from cs2lens.team_stats import team_stats
 
 STATIC_DIR = Path(__file__).parent / "static"
 UPLOADS = "_uploads"
+CHUNK = 1 << 20
 
 
 def rows(df: pl.DataFrame) -> list[dict]:
@@ -81,6 +85,19 @@ class Library:
         if manifest.get("demo_path") and Path(manifest["demo_path"]).exists():
             return Path(manifest["demo_path"])
         return next((p for p in self.demos() if p.stem == d.name), None)
+
+    def owns_demo(self, path: Path) -> bool:
+        """Only .dem files in the library folders (or uploads) may be deleted through the API."""
+        return path.suffix.lower() == ".dem" and path.is_file() and any(path.resolve() == p.resolve() for p in self.demos())
+
+
+@lru_cache(maxsize=1024)
+def _demo_map(path: str, _mtime: float) -> str | None:
+    """Map name from the demo header (reads only the start of the file)."""
+    try:
+        return Demo(path).header.get("map_name")
+    except Exception:  # noqa: BLE001 - a broken or partial file just has no map
+        return None
 
 
 def _stamp(d: Path) -> float:
@@ -222,6 +239,18 @@ def create_app(out: str | Path = "out") -> FastAPI:
         job = jobs.submit("extract", str(demo), demo.stem, lambda progress: extract(demo, target, progress=progress))
         return {"job": job.id}
 
+    def queue_new(demo: Path) -> int | None:
+        """Extract a demo unless it already has an extract."""
+        return None if (lib.out / demo.stem / "manifest.json").exists() else queue_extract(demo)["job"]
+
+    def unpack_then_extract(archive: Path, progress) -> None:
+        try:
+            demos = unpack(archive, archive.parent, progress)
+        finally:
+            archive.unlink(missing_ok=True)
+        for demo in demos:
+            queue_new(demo)
+
     @api.get("/api/library")
     def library() -> dict:
         matches = []
@@ -232,7 +261,7 @@ def create_app(out: str | Path = "out") -> FastAPI:
             if "header" not in manifest:  # e.g. an aggregate directory
                 continue
             entry = {"id": d.name, "map": manifest["header"].get("map_name"), "has_replay": (d / "replay.parquet").exists(),
-                     "modified": _stamp(d)}
+                     "modified": _stamp(d), "busy": jobs.active_for_match(d.name) is not None}
             try:
                 ov = _overview(d, _stamp(d))
                 entry |= {"score": ov["score"], "rounds": len(ov["timeline"])}
@@ -242,7 +271,9 @@ def create_app(out: str | Path = "out") -> FastAPI:
         demos = []
         for p in lib.demos():
             job = jobs.active_for(str(p))
-            demos.append({"path": str(p), "name": p.name, "size_mb": round(p.stat().st_size / 2**20, 1),
+            st = p.stat()
+            demos.append({"path": str(p), "name": p.name, "size_mb": round(st.st_size / 2**20, 1), "map": _demo_map(str(p), st.st_mtime),
+                          "match_id": p.stem, "uploaded": p.parent == lib.out / UPLOADS,
                           "extracted": (lib.out / p.stem / "manifest.json").exists(), "job": job.id if job else None})
         return {"out": str(lib.out.resolve()), "folders": lib.folders(), "matches": matches, "demos": demos}
 
@@ -270,16 +301,63 @@ def create_app(out: str | Path = "out") -> FastAPI:
 
     @api.put("/api/upload")
     async def upload(request: Request, name: str) -> dict:
-        safe = Path(name).name
-        if not safe.lower().endswith(".dem"):
-            raise HTTPException(400, "only .dem files")
+        """Stream a .dem or an archive with demos into ``out/_uploads`` and queue the work.
+
+        The body goes to a ``.part`` file first, so a broken upload never shows up as a demo.
+        A demo already there with the same size is not written again, and a demo that already
+        has an extract is not parsed again. Archives are unpacked by a job that then queues
+        the extraction of every demo inside.
+        """
+        safe = Path(name.replace("\\", "/")).name
+        archive = is_archive(safe)
+        if not (safe.lower().endswith(".dem") or archive):
+            raise HTTPException(400, "only .dem files or archives (.zip, .rar, .7z, .tar.*, .gz, .bz2, .xz, .zst)")
         folder = lib.out / UPLOADS
         folder.mkdir(exist_ok=True)
         target = folder / safe
-        with target.open("wb") as f:
-            async for chunk in request.stream():
-                f.write(chunk)
-        return queue_extract(target)
+        if jobs.active_for(str(target)):
+            raise HTTPException(409, f"{safe} is being processed; wait for the job to finish")
+        size = int(request.headers.get("content-length") or -1)
+        if not archive and target.exists() and target.stat().st_size == size:
+            return {"job": queue_new(target), "name": safe}
+        part = target.with_name(target.name + ".part")
+        try:
+            with part.open("wb", buffering=CHUNK) as f:
+                async for chunk in request.stream():
+                    f.write(chunk)
+            part.replace(target)
+        finally:
+            part.unlink(missing_ok=True)
+        if archive:
+            job = jobs.submit("unpack", str(target), target.stem, lambda progress: unpack_then_extract(target, progress))
+            return {"job": job.id, "name": safe}
+        return {"job": queue_extract(target)["job"], "name": safe}
+
+    @api.delete("/api/matches/{match_id}")
+    def delete_match(match_id: str, demo: bool = False) -> dict:
+        """Delete an extract; with ``demo=true`` also its source .dem if it is in the library."""
+        d = lib.match_dir(match_id)
+        if jobs.active_for_match(match_id):
+            raise HTTPException(409, "the match is being processed; wait for the job to finish")
+        source = lib.demo_for(d) if demo else None
+        shutil.rmtree(d)
+        for cached in (_overview, _tactics, _points):
+            cached.cache_clear()
+        deleted_demo = None
+        if source is not None and lib.owns_demo(source):
+            source.unlink()
+            deleted_demo = str(source)
+        return {"deleted": match_id, "demo": deleted_demo}
+
+    @api.delete("/api/demos")
+    def delete_demo(path: str) -> dict:
+        p = Path(path)
+        if not lib.owns_demo(p):
+            raise HTTPException(404, f"not a demo of the library: {path}")
+        if jobs.active_for(str(p)):
+            raise HTTPException(409, "the demo is being processed; wait for the job to finish")
+        p.unlink()
+        return {"deleted": str(p)}
 
     @api.get("/api/jobs")
     def list_jobs() -> list[dict]:

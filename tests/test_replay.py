@@ -28,3 +28,18 @@ def test_payload_is_cached(dust2_mini, tmp_path):
     assert list((d / "replay").glob("round_3.*.json.gz"))
     assert round_payload(d, 3) == first
     assert json.loads(gzip.decompress(first))["round"] == 3
+
+
+def test_inventory_shots_and_duels(dust2_mini):
+    m = load_match(dust2_mini, extra_tables=("smokes", "fires", "grenades", "blinds", "shots", "damages"))
+    doc = build_round(m, 5)
+    for p in doc["players"]:
+        assert p["inv"] and all(0 <= i < len(doc["items"]) for _, i in p["inv"])
+    assert any(len(inv) > 2 for inv in doc["items"])  # somebody carries grenades
+    shots = doc["shots"]
+    assert len({len(v) for v in shots.values()}) == 1
+    assert any(h is not None for h in shots["hx"])  # some shots hit a player
+    for k in doc["kills"]:
+        assert set(k) >= {"dist", "attacker_hp", "victim_weapon", "given", "taken", "trade", "traded"}
+        if k["attacker"] and k["weapon"] not in ("hegrenade", "inferno", "molotov"):
+            assert k["given"][0] >= 1 and k["given"][1] > 0

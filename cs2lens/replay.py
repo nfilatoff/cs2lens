@@ -1,42 +1,53 @@
 """Compact per-round replay data for the app's 2D replay.
 
 One round becomes a JSON document with a shared tick grid and per-player arrays
-(``x``, ``y``, ``z``, ``yaw``, ``hp``, ...), plus grenade trajectories, smokes and fires
-with their real lifetimes, blinds, kills, bomb events and shots. Documents are cached
-gzipped in ``<extract>/replay/round_<n>.v<FORMAT>.json.gz``.
+(``x``, ``y``, ``z``, ``yaw``, ``hp``, ...), inventory changes, grenade trajectories, smokes
+and fires with their real lifetimes, blinds, kills with duel details, bomb events and shots
+with their direction and hit point. Documents are cached gzipped in
+``<extract>/replay/round_<n>.v<FORMAT>.json.gz``.
 
 Frames come from ``replay.parquet`` (every few ticks, written by ``extract``); older
-extracts without it fall back to the 0.5 s snapshots.
+extracts without it fall back to the 0.5 s snapshots. Inventories always come from the snapshots (they change rarely).
 """
 
 from __future__ import annotations
 
 import gzip
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import polars as pl
 
 from cs2lens.context import Match, load_match
 
-FORMAT = 3  # bump when the document changes; old cache files are then ignored
+FORMAT = 4  # bump when the document changes; old cache files are then ignored
 PRE_FREEZE_SEC = 20.0  # replay starts at most this long before freeze end
 POST_END_SEC = 4.0  # and runs this long after the round end (capped by the official end)
 GRENADE_STEP = 2  # keep every n-th tick of grenade trajectories
 THROWER_RADIUS = 120.0  # a player this close to a grenade's first position threw it
+NON_GUNS = ("knife", "bayonet", "grenade", "flashbang", "molotov", "decoy", "c4")  # no tracer for these
+INV_COLUMNS = ["primary_weapon", "secondary_weapon", "smoke_grenades", "flashbangs", "he_grenades", "fire_grenades", "decoy_grenades", "inventory"]
 
 
 def cache_path(directory: Path, round_num: int) -> Path:
     return directory / "replay" / f"round_{round_num}.v{FORMAT}.json.gz"
 
 
+@lru_cache(maxsize=2)
+def _match(directory: Path, _stamp: float) -> Match:
+    """The loaded match, kept while rounds of it are built (the clip builder asks for many at once)."""
+    return load_match(directory, extra_tables=("smokes", "fires", "grenades", "blinds", "shots", "damages"))
+
+
 def round_payload(directory: str | Path, round_num: int) -> bytes:
     """Gzipped JSON replay of one round, built once and then read from the cache."""
     directory = Path(directory)
     path = cache_path(directory, round_num)
-    if path.exists() and path.stat().st_mtime >= (directory / "manifest.json").stat().st_mtime:
+    stamp = (directory / "manifest.json").stat().st_mtime
+    if path.exists() and path.stat().st_mtime >= stamp:
         return path.read_bytes()
-    doc = build_round(load_match(directory, extra_tables=("smokes", "fires", "grenades", "blinds", "shots")), round_num)
+    doc = build_round(_match(directory, stamp), round_num)
     data = gzip.compress(json.dumps(doc, separators=(",", ":")).encode("utf-8"), compresslevel=6)
     path.parent.mkdir(exist_ok=True)
     path.write_bytes(data)
@@ -114,6 +125,12 @@ def build_round(m: Match, round_num: int) -> dict:
             "money": int(f["money"].drop_nulls().first()) if "money" in f.columns and f["money"].drop_nulls().len() else None,
         })
 
+    inventories = _inventories(m, start, end, roster["steamid"])
+    items: dict[tuple, int] = {}
+    for p in players:
+        changes = inventories.get(int(p["steamid"]))
+        p["inv"] = [[t, items.setdefault(inv, len(items))] for t, inv in changes] if changes else None
+
     names = {int(p["steamid"]): p["name"] for p in players}
     return {
         "format": FORMAT,
@@ -131,6 +148,7 @@ def build_round(m: Match, round_num: int) -> dict:
         "ticks": ticks.to_list(),
         "teams": {r["side"]: r["team"] for r in sides.iter_rows(named=True)},
         "weapons": weapons,
+        "items": [list(inv) for inv in items],
         "players": players,
         "grenades": _grenades(m, start, end, frames),
         "smokes": _areas(m.data["smokes"], start, end),
@@ -157,6 +175,11 @@ def build_round(m: Match, round_num: int) -> dict:
                 "flashed": bool(r["assist_flash"]),
                 "ax": _r(r["attacker_x"]), "ay": _r(r["attacker_y"]), "az": _r(r["attacker_z"]),
                 "vx": _r(r["victim_x"]), "vy": _r(r["victim_y"]), "vz": _r(r["victim_z"]),
+                "assister_name": r["assister_name"],
+                "hitgroup": r["hitgroup_name"] or r["hitgroup"],
+                "trade": bool(r["is_trade"]),
+                "traded": bool(r["victim_traded"]),
+                **_duel(m, r, start, frames),
             }
             for r in _in(m.data["kills"], "tick", start, end).sort("tick").iter_rows(named=True)
         ],
@@ -225,6 +248,72 @@ def _grenades(m: Match, start: int, end: int, frames: pl.DataFrame) -> list[dict
     return out
 
 
+def _inventories(m: Match, start: int, end: int, steamids: pl.Series) -> dict[int, list[tuple[int, tuple]]]:
+    """Per player, the ticks where the inventory changes and the new inventory.
+
+    An inventory is ``(primary, secondary, *grenades)``; a grenade appears once per carried copy.
+    """
+    snaps = m.data["snapshots"]
+    if any(c not in snaps.columns for c in INV_COLUMNS):
+        return {}
+    s = _in(snaps, "tick", start, end).filter(pl.col("steamid").is_in(steamids.implode()) & (pl.col("health") > 0)).sort("tick")
+    out: dict[int, list[tuple[int, tuple]]] = {}
+    for r in s.select("tick", "steamid", *INV_COLUMNS).iter_rows(named=True):
+        inv = r["inventory"] or ""
+        fire = "incendiary" if "incendiary" in inv else "molotov"
+        key = (
+            r["primary_weapon"], r["secondary_weapon"],
+            *["smokegrenade"] * (r["smoke_grenades"] or 0), *["flashbang"] * (r["flashbangs"] or 0),
+            *["hegrenade"] * (r["he_grenades"] or 0), *[fire] * (r["fire_grenades"] or 0), *["decoy"] * (r["decoy_grenades"] or 0),
+        )
+        changes = out.setdefault(r["steamid"], [])
+        if not changes or changes[-1][1] != key:
+            changes.append((r["tick"], key))
+    return out
+
+
+def _duel(m: Match, kill: dict, start: int, frames: pl.DataFrame) -> dict:
+    """Damage both ways between killer and victim this round, distance, killer HP and the victim's weapon."""
+    a, v, tick = kill["attacker_steamid"], kill["victim_steamid"], kill["tick"]
+    dmg = m.data["damages"].filter(pl.col("tick").is_between(start, tick)) if "damages" in m.data else None
+    out: dict = {"dist": None, "attacker_hp": None, "victim_weapon": None, "given": [0, 0], "taken": [0, 0], "duel_start": None}
+    if None not in (kill["attacker_x"], kill["victim_x"]):
+        out["dist"] = round(((kill["attacker_x"] - kill["victim_x"]) ** 2 + (kill["attacker_y"] - kill["victim_y"]) ** 2
+                             + (kill["attacker_z"] - kill["victim_z"]) ** 2) ** 0.5)
+    if a and a != v and dmg is not None:
+        given = dmg.filter((pl.col("attacker_steamid") == a) & (pl.col("victim_steamid") == v))
+        taken = dmg.filter((pl.col("attacker_steamid") == v) & (pl.col("victim_steamid") == a))
+        out["given"] = [given.height, int(given["dmg_health"].sum())]
+        out["taken"] = [taken.height, int(taken["dmg_health"].sum())]
+        both = pl.concat([given["tick"], taken["tick"]])
+        out["duel_start"] = int(both.min()) if both.len() else None
+        hurt = dmg.filter(pl.col("victim_steamid") == a)
+        out["attacker_hp"] = int(hurt["health_post"].min()) if hurt.height else 100
+    last = frames.filter((pl.col("steamid") == v) & (pl.col("tick") <= tick) & (pl.col("health") > 0)).sort("tick").tail(1)
+    if last.height:
+        out["victim_weapon"] = last["active_weapon"][0]
+    return out
+
+
 def _shots(m: Match, start: int, end: int) -> dict:
-    s = _in(m.data["shots"], "tick", start, end).sort("tick")
-    return {"tick": s["tick"].to_list(), "player": [str(v) for v in s["steamid"].to_list()]}
+    """Gun shots: shooter, position, view yaw and, when it hit someone on the same tick, the victim's position."""
+    s = _in(m.data["shots"], "tick", start, end).with_columns(weapon=pl.col("weapon").str.replace("^weapon_", ""))
+    s = s.filter(~pl.col("weapon").str.contains("|".join(NON_GUNS))).sort("tick")
+    if "damages" in m.data:
+        hits = (
+            _in(m.data["damages"], "tick", start, end)
+            .select("tick", steamid=pl.col("attacker_steamid"), hx=pl.col("victim_x"), hy=pl.col("victim_y"))
+            .unique(["tick", "steamid"], keep="first")
+        )
+        s = s.join(hits, on=["tick", "steamid"], how="left")
+    else:
+        s = s.with_columns(hx=pl.lit(None, pl.Float64), hy=pl.lit(None, pl.Float64))
+    return {
+        "tick": s["tick"].to_list(),
+        "player": [str(v) for v in s["steamid"].to_list()],
+        "x": _ints(s["x"]),
+        "y": _ints(s["y"]),
+        "yaw": _ints(s["yaw"]),
+        "hx": [None if v is None else round(v) for v in s["hx"].to_list()],
+        "hy": [None if v is None else round(v) for v in s["hy"].to_list()],
+    }
