@@ -2,6 +2,7 @@
 // Rendering is deterministic: frame i shows clip time i / fps * speed, however long encoding takes.
 import { GIFEncoder, applyPalette, quantize } from "gifenc";
 import { ArrayBufferTarget, Muxer } from "mp4-muxer";
+import { strToU8, zipSync } from "fflate";
 
 export type RenderFrame = (ctx: CanvasRenderingContext2D, time: number) => void;
 
@@ -124,6 +125,15 @@ export async function exportMp4(job: ExportJob): Promise<Blob> {
   }
   muxer.finalize();
   return new Blob([muxer.target.buffer], { type: "video/mp4" });
+}
+
+/** A zip with the clip (stored as is: GIF and MP4 are compressed already) and its text description. */
+export async function zipWith(mediaName: string, media: Blob, textName: string, text: string): Promise<Blob> {
+  const zip = zipSync({
+    [mediaName]: [new Uint8Array(await media.arrayBuffer()), { level: 0 }],
+    [textName]: strToU8("﻿" + text.replace(/\n/g, "\r\n")), // BOM and CRLF: opens cleanly in Notepad
+  });
+  return new Blob([zip as Uint8Array<ArrayBuffer>], { type: "application/zip" });
 }
 
 export function download(blob: Blob, name: string) {

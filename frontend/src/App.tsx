@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { LibraryPage } from "./pages/Library";
 import { MatchPage } from "./pages/Match";
 import { AggregatePage } from "./pages/Aggregate";
+import { ClipView } from "./components/ClipView";
 
-// Hash routes: #/ (library), #/match/<id>/<tab>[/<round>[/<seconds after freeze end>]], #/aggregate
+// Hash routes: #/ (library), #/match/<id>/<tab>[/<round>[/<seconds after freeze end>]], #/aggregate, #/clip
 function useHash(): string[] {
   const read = () => window.location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   const [parts, setParts] = useState(read);
@@ -34,6 +35,9 @@ export function App() {
           <a href="#/aggregate" className={page === "aggregate" ? "active" : ""}>
             Несколько матчей
           </a>
+          <a href="#/clip" className={page === "clip" ? "active" : ""}>
+            Клипы
+          </a>
         </nav>
       </header>
       <main>
@@ -41,6 +45,10 @@ export function App() {
           <MatchPage id={rest[0]} tab={rest[1] ?? "overview"} round={rest[2] ? Number(rest[2]) : undefined} at={rest[3] ? Number(rest[3]) : undefined} />
         ) : page === "aggregate" ? (
           <AggregatePage />
+        ) : page === "clip" ? (
+          <div className="page">
+            <ClipView />
+          </div>
         ) : (
           <LibraryPage />
         )}

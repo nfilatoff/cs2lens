@@ -171,6 +171,8 @@ tr.clickable:hover td { background: #1c2733; cursor: pointer; }
 .chip.won { font-weight: 800; }
 .layers { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; margin: 8px 0; }
 .ok-text { color: var(--ok); }
+.clip-matches { max-height: 180px; margin: 6px 0; }
+.clip-text { white-space: pre-wrap; max-height: 320px; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 11px; }
 
 .lib-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
 .card { position: relative; }

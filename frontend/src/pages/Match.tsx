@@ -72,7 +72,7 @@ export function MatchPage({ id, tab, round, at }: { id: string; tab: string; rou
       {tab === "tactics" && <Tactics id={id} />}
       {tab === "replay" && <ReplayView match={match} round={round ?? match.timeline[0]?.round ?? 1} at={at} />}
       {tab === "maps" && <MapsView match={match} />}
-      {tab === "clip" && <ClipView match={match} />}
+      {tab === "clip" && <ClipView initial={match} />}
     </div>
   );
 }

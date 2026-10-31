@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "fflate": "^0.8.2",
     "gifenc": "^1.0.3",
     "mp4-muxer": "^5.2.2",
     "react": "^19.3.1",

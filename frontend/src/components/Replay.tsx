@@ -134,7 +134,7 @@ export function ReplayView({ match, round, at }: { match: MatchOverview; round: 
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [view, setView] = useState<number | "all">("all");
-  const [opts, setOpts] = useState({ names: true, weapons: true, trails: true, shots: true });
+  const [opts, setOpts] = useState({ names: true, weapons: false, trails: true, shots: true });
   const [hover, setHover] = useState<{ kill: number; x: number; y: number } | null>(null);
   const [uiTick, setUiTick] = useState(0);
   const tickRef = useRef(0);

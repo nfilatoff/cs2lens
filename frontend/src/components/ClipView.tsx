@@ -1,400 +1,589 @@
-// Clip builder: one player's or one team's rounds on the radar, overlaid on a shared round
-// clock or played one after another, exported to GIF or MP4.
+// Clip builder: one player's or one team's rounds from one or several demos of the same map,
+// overlaid on a shared round clock or played one after another. A frame is a header (who,
+// against whom, round clock), the radar with a grid, and a footer with a caption computed
+// from the map's callouts and a legend. Exports go into a zip with a text file of the facts.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MatchOverview, Replay, ReplayPlayer, Side } from "../api";
-import { canEncodeVideo, download, exportGif, exportMp4 } from "../clipExport";
+import { api, type LibraryMatch, type MatchOverview, type Replay, type Side } from "../api";
+import { canEncodeVideo, download, exportGif, exportMp4, zipWith } from "../clipExport";
+import { BUY_LABELS, clockOf, summarize, type ClipInfo, type Summary, type Track } from "../clipSummary";
 import {
-  RADAR_SIZE, drawRadar, levelLabel, levelOf, panelLevels, sideColor, sideShort, useMapAssets, worldToPx, type MapAssets,
+  RADAR_SIZE, T_COLOR, drawRadar, levelLabel, levelOf, panelLevels, sideColor, sideShort, useMapAssets, worldToPx,
+  type MapAssets,
 } from "../radar";
-import {
-  FIRE_SEC, NADE_COLORS, SMOKE_SEC, drawArea, drawGrenade, drawKillMark, drawPlayer, drawShots, fmtClock, frameAt,
-  loadReplay, outlinedText, playerState, weaponName,
-} from "../replayDraw";
+import { FIRE_SEC, SMOKE_SEC, SMOKE_RADIUS, frameAt, loadReplay, playerState } from "../replayDraw";
 
-const ROUND_TIME = 115;
-const PALETTE = [
-  "#4fc3f7", "#ffb74d", "#81c784", "#e57373", "#ba68c8", "#fff176", "#4db6ac", "#f06292",
-  "#9fa8da", "#a1887f", "#aed581", "#ff8a65", "#90a4ae", "#ce93d8", "#80deea", "#ffd54f",
-];
 const TRAIL_STEP = 3; // draw every n-th frame of a movement trail
-const FEED_SEC = 4;
+const TRACER_TICKS = 6;
+const TRACER_MISS = 600; // world units
 const LOAD_CONCURRENCY = 4;
+const GRID = 16; // radar grid cells per side (A-P, 1-16)
+const FRAG = "#ff4040";
+const PLANT = "#ff2d75";
+const NADE_MARK: Record<string, { fill: string | null; ring: string | null }> = {
+  smoke: { fill: "#b8bcc2", ring: null },
+  molotov: { fill: "#ff5a1f", ring: null },
+  incendiary: { fill: "#ff5a1f", ring: null },
+  flashbang: { fill: null, ring: "#ffffff" },
+  he: { fill: null, ring: "#ffd23f" },
+  decoy: { fill: null, ring: "#8a949e" },
+};
 
 type Subject = { kind: "player"; steamid: string } | { kind: "team"; team: string };
 type Layout = "overlay" | "sequence";
 
 interface Layers {
   trails: boolean;
-  cone: boolean;
+  view: boolean;
   shots: boolean;
   nades: boolean;
   kills: boolean;
-  weapons: boolean;
-  labels: boolean;
   others: boolean;
-}
-
-interface Track {
-  round: number;
-  r: Replay;
-  players: ReplayPlayer[]; // the subject's players in this round
-  ids: Set<string>;
-  side: Side | undefined;
-  won: boolean;
-  color: string; // used when entries are coloured per round
+  grid: boolean;
 }
 
 interface Clip {
   tracks: Track[];
-  subject: Subject;
-  title: string;
-  layout: Layout;
-  from: number; // seconds after freeze end
-  to: number;
+  info: ClipInfo;
+  summary: Summary;
   layers: Layers;
-  playerColor: Map<string, string>;
+  colors: Map<string, string>; // team mode: steamid -> colour
 }
 
 // ---- clip time ----
 // Overlay: clip time T is the same round time in every round. Sequence: rounds play one after another.
-interface Segment { track: Track; t: number; endT: number }
+const roundLen = (r: Replay) => (r.last_tick - r.freeze_end_tick) / r.tick_rate;
 
-function roundLen(r: Replay) {
-  return (r.last_tick - r.freeze_end_tick) / r.tick_rate;
-}
-
-function segments(c: Clip): Segment[] {
+function segments(c: Clip) {
   return c.tracks
-    .map((track) => ({ track, t: c.from, endT: Math.min(c.to, roundLen(track.r)) }))
+    .map((track) => ({ track, t: c.info.from, endT: Math.min(c.info.to, roundLen(track.r)) }))
     .filter((s) => s.endT > s.t);
 }
 
 function duration(c: Clip): number {
-  if (c.layout === "overlay") return Math.max(0, c.to - c.from);
+  if (c.info.layout === "overlay") return Math.max(0, c.info.to - c.info.from);
   return segments(c).reduce((sum, s) => sum + (s.endT - s.t), 0);
 }
 
-/** Which rounds are on screen at clip time T, and at what round time. */
-function activeAt(c: Clip, T: number): { track: Track; t: number }[] {
-  if (c.layout === "overlay") return c.tracks.map((track) => ({ track, t: c.from + T }));
+function activeAt(c: Clip, T: number): { track: Track; t: number; index: number }[] {
+  if (c.info.layout === "overlay") return c.tracks.map((track, index) => ({ track, t: c.info.from + T, index }));
   let left = T;
   const segs = segments(c);
   for (const s of segs) {
     const len = s.endT - s.t;
-    if (left <= len) return [{ track: s.track, t: s.t + left }];
+    if (left <= len) return [{ track: s.track, t: s.t + left, index: c.tracks.indexOf(s.track) }];
     left -= len;
   }
   const last = segs[segs.length - 1];
-  return last ? [{ track: last.track, t: last.endT }] : [];
+  return last ? [{ track: last.track, t: last.endT, index: c.tracks.indexOf(last.track) }] : [];
+}
+
+// ---- frame layout ----
+interface FrameLayout {
+  u: number; // text scale
+  map: number; // radar panel size
+  width: number;
+  height: number;
+  headerH: number;
+  footerY: number;
+  caption: string[]; // wrapped lines
+}
+
+const measure = document.createElement("canvas").getContext("2d")!;
+
+function wrap(text: string, font: string, width: number): string[] {
+  measure.font = font;
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(" ")) {
+    const next = line ? `${line} ${word}` : word;
+    if (measure.measureText(next).width > width && line) {
+      lines.push(line);
+      line = word;
+    } else line = next;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+const even = (v: number) => Math.ceil(v / 2) * 2; // H.264 needs even frame sizes
+
+function frameLayout(map: number, panels: number, caption: string | null): FrameLayout {
+  const u = map / 760;
+  const width = even(map * panels);
+  const headerH = Math.round(126 * u);
+  const lines = caption ? wrap(caption, captionFont(u), width - 24 * u) : [];
+  const footerH = Math.round(14 * u + lines.length * 24 * u + (lines.length ? 10 * u : 0) + 2 * 24 * u + 10 * u);
+  return { u, map, width, height: even(headerH + map + footerH), headerH, footerY: headerH + map, caption: lines };
+}
+
+const captionFont = (u: number) => `700 ${17 * u}px system-ui, sans-serif`;
+
+// ---- markers (also used by the legend) ----
+type C2D = CanvasRenderingContext2D;
+
+function playerMark(ctx: C2D, x: number, y: number, yaw: number | null, color: string, s: number, view: boolean) {
+  if (view && yaw !== null) {
+    const ang = (-yaw * Math.PI) / 180;
+    const x2 = x + Math.cos(ang) * 16 * s, y2 = y + Math.sin(ang) * 16 * s;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(0,0,0,0.55)";
+    ctx.lineWidth = 3.6 * s;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2 * s;
+    ctx.stroke();
+    ctx.lineCap = "butt";
+  }
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "#1a1a1a";
+  ctx.lineWidth = 1.4 * s;
+  ctx.beginPath();
+  ctx.arc(x, y, 5.5 * s, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+}
+
+function fragMark(ctx: C2D, x: number, y: number, s: number) {
+  ctx.fillStyle = FRAG;
+  ctx.strokeStyle = "#1a1a1a";
+  ctx.lineWidth = 1.2 * s;
+  ctx.beginPath();
+  ctx.arc(x, y, 4 * s, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+}
+
+function deathMark(ctx: C2D, x: number, y: number, s: number) {
+  const d = 5 * s;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(x - d, y - d);
+  ctx.lineTo(x + d, y + d);
+  ctx.moveTo(x + d, y - d);
+  ctx.lineTo(x - d, y + d);
+  ctx.strokeStyle = "#000";
+  ctx.lineWidth = 4 * s;
+  ctx.stroke();
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 2 * s;
+  ctx.stroke();
+  ctx.lineCap = "butt";
+}
+
+function nadeMark(ctx: C2D, type: string, x: number, y: number, s: number) {
+  const m = NADE_MARK[type] ?? NADE_MARK.decoy;
+  ctx.beginPath();
+  ctx.arc(x, y, 4.5 * s, 0, Math.PI * 2);
+  if (m.fill) {
+    ctx.fillStyle = m.fill;
+    ctx.fill();
+    ctx.strokeStyle = "#1a1a1a";
+    ctx.lineWidth = 1 * s;
+    ctx.stroke();
+  } else {
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 3.4 * s;
+    ctx.stroke();
+    ctx.strokeStyle = m.ring!;
+    ctx.lineWidth = 1.8 * s;
+    ctx.stroke();
+  }
+}
+
+function plantMark(ctx: C2D, x: number, y: number, s: number) {
+  ctx.fillStyle = PLANT;
+  ctx.strokeStyle = "#1a1a1a";
+  ctx.lineWidth = 1 * s;
+  ctx.fillRect(x - 4 * s, y - 4 * s, 8 * s, 8 * s);
+  ctx.strokeRect(x - 4 * s, y - 4 * s, 8 * s, 8 * s);
 }
 
 // ---- drawing ----
-function entryColor(c: Clip, track: Track, steamid: string): string {
-  if (c.subject.kind === "team") return c.playerColor.get(steamid) ?? "#fff";
-  return c.layout === "overlay" ? track.color : sideColor(track.side);
-}
+// a player in the side colour; in team mode every player has a colour of their own
+const color = (c: Clip, track: Track, steamid: string) => c.colors.get(steamid) ?? sideColor(track.side);
+const PLAYER_PALETTE = ["#f2b134", "#5aa9ff", "#7bd389", "#ff7b9c", "#c792ea", "#ffe066", "#4dd0e1", "#ff8a65", "#a1887f", "#b0bec5"];
 
-function drawClip(ctx: CanvasRenderingContext2D, assets: MapAssets, c: Clip, T: number, levels: number[], size: number) {
-  const { meta, images } = assets;
+function drawMap(ctx: C2D, assets: MapAssets, c: Clip, active: ReturnType<typeof activeAt>, li: number, size: number) {
+  const { meta } = assets;
   const multi = meta.levels.length > 1;
   const k = size / RADAR_SIZE;
   const s = 1 / k;
-  const active = activeAt(c, T);
   const L = c.layers;
+  const vis = (z: number | null | undefined) => (!multi || levelOf(meta, z) === li ? 1 : 0.15);
+  const P = (x: number, y: number) => worldToPx(meta, x, y);
+  ctx.scale(k, k);
 
-  levels.forEach((li, panel) => {
-    const ox = panel * size;
-    drawRadar(ctx, images[li], ox, size);
-    ctx.fillStyle = "rgba(0,0,0,0.25)"; // dim the radar so the overlay stands out
-    ctx.fillRect(ox, 0, size, size);
-    ctx.save();
+  if (L.grid) {
+    const cell = RADAR_SIZE / GRID;
+    ctx.strokeStyle = "rgba(255,255,255,0.07)";
+    ctx.lineWidth = 1 * s;
     ctx.beginPath();
-    ctx.rect(ox, 0, size, size);
-    ctx.clip();
-    ctx.translate(ox, 0);
-    ctx.scale(k, k);
-    const vis = (z: number | null | undefined) => (!multi || levelOf(meta, z) === li ? 1 : 0.15);
-    const P = (x: number, y: number) => worldToPx(meta, x, y);
+    for (let i = 1; i < GRID; i++) {
+      ctx.moveTo(i * cell, 0);
+      ctx.lineTo(i * cell, RADAR_SIZE);
+      ctx.moveTo(0, i * cell);
+      ctx.lineTo(RADAR_SIZE, i * cell);
+    }
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.font = `${11 * s}px system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    for (let i = 0; i < GRID; i++) {
+      ctx.fillText(String.fromCharCode(65 + i), (i + 0.5) * cell, 14 * s);
+      if (i) ctx.fillText(String(i + 1), 9 * s, (i + 0.5) * cell + 4 * s);
+    }
+  }
 
-    for (const { track, t } of active) {
-      const r = track.r;
-      const tick = Math.min(r.last_tick, r.freeze_end_tick + t * r.tick_rate);
-      const t0 = Math.max(r.start_tick, r.freeze_end_tick + c.from * r.tick_rate);
+  for (const { track, t } of active) {
+    const r = track.r;
+    const tick = Math.min(r.last_tick, r.freeze_end_tick + t * r.tick_rate);
+    const t0 = Math.max(r.start_tick, r.freeze_end_tick + c.info.from * r.tick_rate);
 
-      // utility effects: the subject's smokes and fires (everyone's in sequence mode with "others")
-      const showAll = L.others && c.layout === "sequence";
-      if (L.nades) {
-        if (showAll) {
-          for (const a of r.smokes) if (tick >= a.start && tick <= a.end) drawArea(ctx, "smoke", a.x, a.y, P, meta.scale, 0.8 * vis(a.z));
-          for (const a of r.fires) if (tick >= a.start && tick <= a.end) drawArea(ctx, "fire", a.x, a.y, P, meta.scale, vis(a.z));
-        } else {
-          for (const g of r.grenades) {
-            if (!g.thrower || !track.ids.has(g.thrower) || tick < g.end) continue;
-            const life = g.type === "smoke" ? SMOKE_SEC : g.type === "molotov" || g.type === "incendiary" ? FIRE_SEC : 0;
-            if (tick > g.end + life * r.tick_rate) continue;
-            const n = g.x.length - 1;
-            drawArea(ctx, g.type === "smoke" ? "smoke" : "fire", g.x[n], g.y[n], P, meta.scale, 0.8 * vis(g.z[n]));
-          }
-        }
+    // smoke clouds and fires of the subject's grenades while they last
+    if (L.nades) {
+      for (const g of r.grenades) {
+        if (!g.thrower || !track.ids.has(g.thrower) || tick < g.end || g.t[0] < t0) continue;
+        const life = g.type === "smoke" ? SMOKE_SEC : g.type === "molotov" || g.type === "incendiary" ? FIRE_SEC : 0;
+        if (tick > g.end + life * r.tick_rate) continue;
+        const n = g.x.length - 1;
+        const [px, py] = P(g.x[n], g.y[n]);
+        ctx.globalAlpha = 0.22 * vis(g.z[n]);
+        ctx.fillStyle = g.type === "smoke" ? "#cfd3d6" : "#ff6a1a";
+        ctx.beginPath();
+        ctx.arc(px, py, (g.type === "smoke" ? SMOKE_RADIUS : 110) / meta.scale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
       }
+    }
 
-      // movement trails
-      if (L.trails) {
-        const [i1] = frameAt(r.ticks, tick);
-        const [i0] = frameAt(r.ticks, t0);
-        for (const p of track.players) {
-          ctx.strokeStyle = entryColor(c, track, p.steamid);
-          ctx.lineWidth = 1.6 * s;
-          ctx.lineJoin = "round";
-          ctx.globalAlpha = 0.55;
-          ctx.beginPath();
-          let started = false;
-          for (let q = i0; q < i1 + TRAIL_STEP; q += TRAIL_STEP) {
-            const i = Math.min(q, i1); // always end the trail at the current frame
-            const x = p.x[i], y = p.y[i];
-            if (x === null || y === null || p.hp[i] <= 0 || (multi && levelOf(meta, p.z[i]) !== li)) {
-              started = false;
-              continue;
-            }
-            const [px, py] = P(x, y);
-            if (started) ctx.lineTo(px, py);
-            else ctx.moveTo(px, py);
-            started = true;
-          }
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-        }
-      }
-
-      // grenades: flight with the path, then a landing marker that stays
-      if (L.nades) {
-        for (const g of r.grenades) {
-          if (!g.thrower || !track.ids.has(g.thrower) || tick < g.t[0] || g.t[0] < t0) continue;
-          const color = entryColor(c, track, g.thrower);
-          if (tick <= g.end + 0.25 * r.tick_rate) {
-            drawGrenade(ctx, g, tick, r.tick_rate, P, s, meta.scale, color, vis(g.z[frameAt(g.t, tick)[0]]), true);
+    if (L.trails) {
+      const [i1] = frameAt(r.ticks, tick);
+      const [i0] = frameAt(r.ticks, t0);
+      for (const p of track.players) {
+        ctx.strokeStyle = color(c, track, p.steamid);
+        ctx.lineWidth = 1.3 * s;
+        ctx.lineJoin = "round";
+        ctx.globalAlpha = 0.35;
+        ctx.beginPath();
+        let started = false;
+        for (let q = i0; q < i1 + TRAIL_STEP; q += TRAIL_STEP) {
+          const i = Math.min(q, i1); // always end the trail at the current frame
+          const x = p.x[i], y = p.y[i];
+          if (x === null || y === null || p.hp[i] <= 0 || (multi && levelOf(meta, p.z[i]) !== li)) {
+            started = false;
             continue;
           }
-          const n = g.x.length - 1;
-          const a = vis(g.z[n]);
-          ctx.globalAlpha = 0.3 * a;
-          ctx.strokeStyle = color;
+          const [px, py] = P(x, y);
+          if (started) ctx.lineTo(px, py);
+          else ctx.moveTo(px, py);
+          started = true;
+        }
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // grenades: the flight, then a marker where it landed (kept to the end)
+    if (L.nades) {
+      for (const g of r.grenades) {
+        if (!g.thrower || !track.ids.has(g.thrower) || tick < g.t[0] || g.t[0] < t0) continue;
+        const [gi] = frameAt(g.t, tick);
+        if (tick <= g.end) {
+          ctx.globalAlpha = 0.6 * vis(g.z[gi]);
+          ctx.strokeStyle = color(c, track, g.thrower);
           ctx.lineWidth = 1 * s;
           ctx.setLineDash([3 * s, 3 * s]);
           ctx.beginPath();
-          g.x.forEach((x, q) => (q ? ctx.lineTo(...P(x, g.y[q])) : ctx.moveTo(...P(x, g.y[q]))));
+          for (let q = 0; q <= gi; q++) (q ? ctx.lineTo(...P(g.x[q], g.y[q])) : ctx.moveTo(...P(g.x[q], g.y[q])));
           ctx.stroke();
           ctx.setLineDash([]);
-          const [px, py] = P(g.x[n], g.y[n]);
-          ctx.globalAlpha = a;
-          ctx.fillStyle = NADE_COLORS[g.type] ?? "#ccc";
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 2 * s;
-          ctx.beginPath();
-          ctx.arc(px, py, 4.5 * s, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-          ctx.globalAlpha = 1;
+          ctx.globalAlpha = vis(g.z[gi]);
+          nadeMark(ctx, g.type, ...P(g.x[gi], g.y[gi]), s * 0.7);
+        } else {
+          const n = g.x.length - 1;
+          ctx.globalAlpha = vis(g.z[n]);
+          nadeMark(ctx, g.type, ...P(g.x[n], g.y[n]), s);
         }
+        ctx.globalAlpha = 1;
       }
-
-      // the subject's kills and deaths
-      if (L.kills) {
-        for (const kill of r.kills) {
-          if (kill.tick > tick || kill.tick < t0) continue;
-          if (kill.attacker && track.ids.has(kill.attacker)) {
-            const color = entryColor(c, track, kill.attacker);
-            if (kill.ax !== null && kill.ay !== null) {
-              ctx.globalAlpha = 0.6 * vis(kill.vz);
-              ctx.strokeStyle = color;
-              ctx.lineWidth = 1.2 * s;
-              ctx.beginPath();
-              ctx.moveTo(...P(kill.ax, kill.ay));
-              ctx.lineTo(...P(kill.vx, kill.vy));
-              ctx.stroke();
-            }
-            drawKillMark(ctx, kill, P, s, color, vis(kill.vz));
-          }
-          if (track.ids.has(kill.victim)) {
-            const [px, py] = P(kill.vx, kill.vy);
-            ctx.globalAlpha = vis(kill.vz);
-            outlinedText(ctx, "☠", px, py + 5 * s, s, 15, entryColor(c, track, kill.victim));
-            ctx.globalAlpha = 1;
-          }
-        }
-      }
-
-      // everyone else, faint, for context
-      if (L.others && tick < r.last_tick) {
-        for (const p of r.players) {
-          if (track.ids.has(p.steamid)) continue;
-          const st = playerState(r, p, tick);
-          if (st.hp <= 0 || Number.isNaN(st.x)) continue;
-          const [px, py] = P(st.x, st.y);
-          ctx.globalAlpha = 0.5 * vis(st.z);
-          ctx.fillStyle = sideColor(p.side);
-          ctx.strokeStyle = "#000";
-          ctx.lineWidth = 1 * s;
-          ctx.beginPath();
-          ctx.arc(px, py, 4 * s, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-        }
-      }
-
-      if (L.shots) {
-        drawShots(ctx, r, tick, P, s, meta.scale, (id) => track.ids.has(id), (id) => entryColor(c, track, id));
-      }
-
-      // the subject's players
-      if (tick < r.last_tick) {
-        const shooting = new Set<string>();
-        for (let q = r.shots.tick.length - 1; q >= 0 && r.shots.tick[q] >= tick - 3; q--) {
-          if (r.shots.tick[q] <= tick) shooting.add(r.shots.player[q]);
-        }
-        for (const p of track.players) {
-          const st = playerState(r, p, tick);
-          if (st.hp <= 0 || Number.isNaN(st.x)) continue;
-          const [px, py] = P(st.x, st.y);
-          const label = !L.labels ? null : c.subject.kind === "team" ? p.name : c.layout === "overlay" ? `R${track.round}` : p.name;
-          drawPlayer(ctx, st, px, py, s, tick, {
-            color: entryColor(c, track, p.steamid), alpha: vis(st.z), label, weapon: L.weapons, cone: L.cone,
-            shooting: L.shots && shooting.has(p.steamid),
-          });
-        }
+      const names = new Set(track.players.map((p) => p.name));
+      for (const b of r.bomb) {
+        if (b.event !== "finish_plant" || b.tick > tick || b.tick < t0 || !b.player || !names.has(b.player)) continue;
+        ctx.globalAlpha = vis(b.z);
+        plantMark(ctx, ...P(b.x, b.y), s);
+        ctx.globalAlpha = 1;
       }
     }
+
+    if (L.kills) {
+      for (const kill of r.kills) {
+        if (kill.tick > tick || kill.tick < t0) continue;
+        ctx.globalAlpha = vis(kill.vz);
+        if (kill.attacker && track.ids.has(kill.attacker)) fragMark(ctx, ...P(kill.vx, kill.vy), s);
+        if (track.ids.has(kill.victim)) deathMark(ctx, ...P(kill.vx, kill.vy), s);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    if (L.others && tick < r.last_tick) {
+      for (const p of r.players) {
+        if (track.ids.has(p.steamid)) continue;
+        const st = playerState(r, p, tick);
+        if (st.hp <= 0 || Number.isNaN(st.x)) continue;
+        const [px, py] = P(st.x, st.y);
+        ctx.globalAlpha = 0.4 * vis(st.z);
+        ctx.fillStyle = sideColor(p.side);
+        ctx.beginPath();
+        ctx.arc(px, py, 3.5 * s, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    if (L.shots) {
+      const sh = r.shots;
+      for (let q = sh.tick.length - 1; q >= 0; q--) {
+        if (sh.tick[q] > tick) continue;
+        if (sh.tick[q] < tick - TRACER_TICKS) break;
+        if (!track.ids.has(sh.player[q])) continue;
+        const [x0, y0] = P(sh.x[q], sh.y[q]);
+        let x1: number, y1: number;
+        if (sh.hx[q] !== null) [x1, y1] = P(sh.hx[q]!, sh.hy[q]!);
+        else {
+          const ang = (-sh.yaw[q] * Math.PI) / 180;
+          [x1, y1] = [x0 + (Math.cos(ang) * TRACER_MISS) / meta.scale, y0 + (Math.sin(ang) * TRACER_MISS) / meta.scale];
+        }
+        const g = ctx.createLinearGradient(x0, y0, x1, y1);
+        g.addColorStop(0, "rgba(255,243,176,0.9)");
+        g.addColorStop(1, sh.hx[q] !== null ? "rgba(255,64,64,0.9)" : "rgba(255,243,176,0)");
+        ctx.globalAlpha = 1 - (tick - sh.tick[q]) / (TRACER_TICKS + 1);
+        ctx.strokeStyle = g;
+        ctx.lineWidth = 1.3 * s;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    if (tick < r.last_tick) {
+      for (const p of track.players) {
+        const st = playerState(r, p, tick);
+        if (st.hp <= 0 || Number.isNaN(st.x)) continue;
+        ctx.globalAlpha = vis(st.z);
+        playerMark(ctx, ...P(st.x, st.y), st.yaw, color(c, track, p.steamid), s, L.view);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+}
+
+function drawFrame(ctx: C2D, assets: MapAssets, c: Clip, T: number, levels: number[], lay: FrameLayout, speed: number) {
+  const { u } = lay;
+  const active = activeAt(c, T);
+  ctx.fillStyle = "#0d0f13";
+  ctx.fillRect(0, 0, lay.width, lay.height);
+
+  levels.forEach((li, panel) => {
+    const ox = panel * lay.map;
+    ctx.save();
+    ctx.translate(0, lay.headerH);
+    drawRadar(ctx, assets.images[li], ox, lay.map);
+    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    ctx.fillRect(ox, 0, lay.map, lay.map);
+    ctx.beginPath();
+    ctx.rect(ox, 0, lay.map, lay.map);
+    ctx.clip();
+    ctx.translate(ox, 0);
+    drawMap(ctx, assets, c, active, li, lay.map);
     ctx.restore();
-    if (multi) {
+    if (assets.meta.levels.length > 1) {
       ctx.fillStyle = "#fff";
-      ctx.font = "13px sans-serif";
-      ctx.textAlign = "left";
-      ctx.fillText(levelLabel(meta, li), ox + size - 70, 20);
+      ctx.font = `${13 * u}px system-ui, sans-serif`;
+      ctx.textAlign = "right";
+      ctx.fillText(levelLabel(assets.meta, li), ox + lay.map - 10 * u, lay.headerH + 20 * u);
     }
   });
-  drawHud(ctx, c, active, size, levels.length);
-}
 
-function roundedBox(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
-  ctx.fillStyle = "rgba(10,12,16,0.78)";
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 6);
-  ctx.fill();
-}
-
-/** Title, round clock, legend and a feed of the subject's kills, drawn into the frame itself. */
-function drawHud(ctx: CanvasRenderingContext2D, c: Clip, active: { track: Track; t: number }[], size: number, panels: number) {
-  const u = Math.max(0.75, size / 768); // scale text with the frame
-  ctx.textAlign = "left";
-  ctx.textBaseline = "alphabetic";
-  const t = active[0]?.t ?? c.from;
-  const clock = t < 0 ? `фризтайм ${fmtClock(-t)}` : fmtClock(ROUND_TIME - t);
-  const sub = c.layout === "overlay"
-    ? `${c.tracks.length} раунд(ов) наложены · +${Math.max(0, Math.floor(t))} с`
-    : active[0]
-      ? `раунд ${active[0].track.round} · ${sideShort(active[0].track.side)} · ${active[0].track.won ? "победа" : "поражение"}`
-      : "";
-  ctx.font = `600 ${13 * u}px system-ui, sans-serif`;
-  const w = Math.max(ctx.measureText(c.title).width, 150 * u) + 20 * u;
-  roundedBox(ctx, 8, 8, w, 74 * u);
-  ctx.fillStyle = "#fff";
-  ctx.fillText(c.title, 18, 8 + 18 * u);
-  ctx.font = `700 ${28 * u}px system-ui, sans-serif`;
-  ctx.fillText(clock, 18, 8 + 50 * u);
-  ctx.font = `${11 * u}px system-ui, sans-serif`;
-  ctx.fillStyle = "#b9c2ce";
-  ctx.fillText(sub, 18, 8 + 67 * u);
-
-  // legend
-  const legend: [string, string][] = c.subject.kind === "team"
-    ? [...c.playerColor].map(([id, color]) => [color, c.tracks.flatMap((tr) => tr.players).find((p) => p.steamid === id)?.name ?? id])
-    : c.layout === "overlay"
-      ? c.tracks.map((tr) => [tr.color, `R${tr.round} ${sideShort(tr.side)} ${tr.won ? "W" : "L"}`])
-      : [];
-  if (legend.length) {
-    const row = 15 * u;
-    const cols = Math.ceil(legend.length / 12);
-    const colW = 92 * u;
-    const rows = Math.ceil(legend.length / cols);
-    const h = rows * row + 10 * u;
-    const y0 = size - h - 8;
-    roundedBox(ctx, 8, y0, cols * colW + 10 * u, h);
-    ctx.font = `${11 * u}px system-ui, sans-serif`;
-    legend.forEach(([color, label], i) => {
-      const x = 14 + Math.floor(i / rows) * colW, y = y0 + 5 * u + (i % rows) * row;
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(x + 5 * u, y + row / 2, 4.5 * u, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#e6e9ee";
-      ctx.fillText(label, x + 14 * u, y + row / 2 + 4 * u);
-    });
-  }
-
-  // kill feed
-  const feed: { text: string; color: string }[] = [];
+  // header
+  const pad = 12 * u;
+  const t = active[0]?.t ?? c.info.from;
+  let alive = 0, total = 0;
   for (const { track, t: rt } of active) {
-    const r = track.r;
-    const tick = r.freeze_end_tick + rt * r.tick_rate;
-    for (const kill of r.kills) {
-      if (kill.tick > tick || tick - kill.tick > FEED_SEC * r.tick_rate) continue;
-      const mine = kill.attacker && track.ids.has(kill.attacker);
-      if (!mine && !track.ids.has(kill.victim)) continue;
-      feed.push({
-        text: `R${track.round}  ${kill.attacker_name ?? "мир"} ✕ ${kill.victim_name} (${weaponName(kill.weapon)}${kill.headshot ? ", HS" : ""})`,
-        color: mine ? "#e6e9ee" : "#ff8a80",
-      });
+    for (const p of track.players) {
+      total++;
+      const tick = track.r.freeze_end_tick + rt * track.r.tick_rate;
+      if (tick < track.r.last_tick && playerState(track.r, p, tick).hp > 0) alive++;
     }
   }
-  if (feed.length) {
-    ctx.font = `${11.5 * u}px system-ui, sans-serif`;
-    const lines = feed.slice(-5);
-    const w2 = Math.max(...lines.map((l) => ctx.measureText(l.text).width)) + 16 * u;
-    const x = size * panels - w2 - 8;
-    lines.forEach((l, i) => {
-      const y = 8 + i * 20 * u;
-      roundedBox(ctx, x, y, w2, 17 * u);
-      ctx.fillStyle = l.color;
-      ctx.fillText(l.text, x + 8 * u, y + 12.5 * u);
-    });
+  ctx.fillStyle = "#121418";
+  ctx.fillRect(0, 0, lay.width, lay.headerH);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#fff";
+  ctx.font = `700 ${46 * u}px system-ui, sans-serif`;
+  ctx.fillText(clockOf(t), lay.width - pad, 48 * u);
+  ctx.font = `${15 * u}px system-ui, sans-serif`;
+  ctx.fillStyle = "#c9cdd3";
+  ctx.fillText(`жив ${alive}/${total} · скорость ${speed}×`, lay.width - pad, 108 * u);
+  const rightW = Math.max(measureWith(ctx, `700 ${46 * u}px system-ui, sans-serif`, "1:55"), measureWith(ctx, `${15 * u}px system-ui, sans-serif`, `жив ${total}/${total} · скорость ${speed}×`));
+  const textW = lay.width - rightW - 3 * pad;
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#fff";
+  fitText(ctx, title(c), pad, 44 * u, textW, 700, 34 * u);
+  ctx.fillStyle = "#c9cdd3";
+  fitText(ctx, subtitle(c), pad, 78 * u, textW, 400, 17 * u);
+  ctx.fillStyle = "#8a94a3";
+  const line3 = c.info.layout === "overlay"
+    ? `${c.tracks.length} ${plural(c.tracks.length, "раунд наложен", "раунда наложены", "раундов наложены")} друг на друга`
+    : active[0] ? `${active[0].track.label} против ${active[0].track.opponent ?? "?"} · ${active[0].index + 1} из ${c.tracks.length} · ${active[0].track.won ? "победа" : "поражение"}` : "";
+  fitText(ctx, line3, pad, 108 * u, textW, 400, 15 * u);
+
+  // footer: caption and legend
+  let y = lay.footerY + 14 * u;
+  ctx.textAlign = "left";
+  if (lay.caption.length) {
+    ctx.fillStyle = "#f6d77a";
+    ctx.font = captionFont(u);
+    for (const line of lay.caption) {
+      y += 20 * u;
+      ctx.fillText(line, pad, y);
+      y += 4 * u;
+    }
+    y += 10 * u;
+  }
+  const sideCol = c.tracks[0] ? sideColor(c.tracks[0].side) : T_COLOR;
+  const items: [(x: number, yy: number) => void, string][][] = [
+    [
+      [(x, yy) => playerMark(ctx, x - 3 * u, yy + 3 * u, 50, sideCol, u, true), c.info.kind === "team" ? "игроки, линия = куда смотрит" : "игрок, линия = куда смотрит"],
+      [(x, yy) => fragMark(ctx, x, yy, u), c.info.kind === "team" ? "их фраг" : "его фраг"],
+      [(x, yy) => deathMark(ctx, x, yy, u), c.info.kind === "team" ? "их смерть" : "его смерть"],
+    ],
+    [
+      [(x, yy) => nadeMark(ctx, "smoke", x, yy, u), "смок"],
+      [(x, yy) => nadeMark(ctx, "molotov", x, yy, u), "молотов"],
+      [(x, yy) => nadeMark(ctx, "flashbang", x, yy, u), "флешка"],
+      [(x, yy) => nadeMark(ctx, "he", x, yy, u), "HE"],
+      [(x, yy) => plantMark(ctx, x, yy, u), "закладка C4"],
+    ],
+  ];
+  ctx.font = `${14 * u}px system-ui, sans-serif`;
+  for (const row of items) {
+    y += 22 * u;
+    let x = pad + 6 * u;
+    for (const [mark, label] of row) {
+      mark(x, y - 5 * u);
+      ctx.fillStyle = "#c9cdd3";
+      ctx.textAlign = "left";
+      ctx.font = `${14 * u}px system-ui, sans-serif`;
+      ctx.fillText(label, x + 14 * u, y);
+      x += 14 * u + ctx.measureText(label).width + 18 * u;
+    }
   }
 }
 
-// ---- component ----
-async function loadAll(id: string, rounds: number[]): Promise<Map<number, Replay>> {
-  const out = new Map<number, Replay>();
+function measureWith(ctx: C2D, font: string, text: string) {
+  ctx.font = font;
+  return ctx.measureText(text).width;
+}
+
+/** Text in one line, shrunk to fit ``width``. */
+function fitText(ctx: C2D, text: string, x: number, y: number, width: number, weight: number, size: number) {
+  let px = size;
+  ctx.font = `${weight} ${px}px system-ui, sans-serif`;
+  while (ctx.measureText(text).width > width && px > size * 0.55) {
+    px *= 0.94;
+    ctx.font = `${weight} ${px}px system-ui, sans-serif`;
+  }
+  ctx.fillText(text, x, y);
+}
+
+function plural(n: number, one: string, few: string, many: string) {
+  const d = n % 10, h = n % 100;
+  if (d === 1 && h !== 11) return one;
+  if (d >= 2 && d <= 4 && (h < 12 || h > 14)) return few;
+  return many;
+}
+
+const mapPretty = (map: string) => {
+  const m = map.replace(/^de_/, "");
+  return m.charAt(0).toUpperCase() + m.slice(1);
+};
+
+function title(c: Clip) {
+  return [c.info.name, c.summary.side, c.summary.mainZone ?? mapPretty(c.info.map)].filter(Boolean).join(" · ");
+}
+
+function subtitle(c: Clip) {
+  const vs = c.summary.opponents.length ? `против ${c.summary.opponents.join(", ")}` : "";
+  const buy = c.info.buy ? BUY_LABELS[c.info.buy] ?? c.info.buy : "";
+  return [c.info.kind === "player" ? c.info.team : "", mapPretty(c.info.map), [buy, vs].filter(Boolean).join(" ")].filter(Boolean).join(" · ");
+}
+
+// ---- data ----
+const overviewCache = new Map<string, Promise<MatchOverview>>();
+function loadOverview(id: string) {
+  let p = overviewCache.get(id);
+  if (!p) {
+    p = api.match(id);
+    p.catch(() => overviewCache.delete(id));
+    overviewCache.set(id, p);
+  }
+  return p;
+}
+
+async function loadRounds(keys: { matchId: string; round: number; key: string }[], onLoaded: (n: number) => void): Promise<Map<string, Replay>> {
+  const out = new Map<string, Replay>();
   let next = 0;
   const worker = async () => {
-    while (next < rounds.length) {
-      const round = rounds[next++];
-      out.set(round, await loadReplay(id, round));
+    while (next < keys.length) {
+      const k = keys[next++];
+      out.set(k.key, await loadReplay(k.matchId, k.round));
+      onLoaded(out.size);
     }
   };
   await Promise.all(Array.from({ length: LOAD_CONCURRENCY }, worker));
   return out;
 }
 
+interface RoundOption {
+  key: string;
+  matchId: string;
+  no: number;
+  round: number;
+  team: string;
+  side: Side | undefined;
+  won: boolean;
+  buy: string | null;
+  opponent: string | null;
+}
+
 const SIZES = [512, 768, 1024];
 
-export function ClipView({ match }: { match: MatchOverview }) {
-  const { assets, error: mapError } = useMapAssets(match.map);
-  const players = useMemo(
-    () => match.players.filter((p) => p.steamid).map((p) => ({ steamid: String(p.steamid), name: String(p.name), team: String(p.team ?? "") })),
-    [match.players],
-  );
-  const teams = Object.keys(match.score);
-  const [subject, setSubject] = useState<Subject>(() => (players[0] ? { kind: "player", steamid: players[0].steamid } : { kind: "team", team: teams[0] }));
-  const subjectTeam = subject.kind === "team" ? subject.team : players.find((p) => p.steamid === subject.steamid)?.team ?? "";
-  const sideIn = (round: number) => match.timeline.find((r) => r.round === round)?.teams[subjectTeam]?.side;
-  const wonIn = (round: number) => match.timeline.find((r) => r.round === round)?.winner === subjectTeam;
-  const [picked, setPicked] = useState<number[]>(() => match.timeline.filter((r) => r.teams[subjectTeam]?.side === "terrorist").map((r) => r.round));
+// ---- component ----
+export function ClipView({ initial }: { initial?: MatchOverview }) {
+  const [library, setLibrary] = useState<LibraryMatch[]>([]);
+  const [map, setMap] = useState(initial?.map ?? "");
+  const [matchIds, setMatchIds] = useState<string[]>(initial ? [initial.id] : []);
+  const [overviews, setOverviews] = useState<Map<string, MatchOverview>>(new Map(initial ? [[initial.id, initial]] : []));
+  const { assets, error: mapError } = useMapAssets(map || undefined);
+
+  const [subject, setSubject] = useState<Subject | null>(null);
+  const [sideFilter, setSideFilter] = useState<Side | "">("terrorist");
+  const [resultFilter, setResultFilter] = useState<"" | "won" | "lost">("");
+  const [buyFilter, setBuyFilter] = useState("");
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+
   const [layout, setLayout] = useState<Layout>("overlay");
   const [from, setFrom] = useState(0);
-  const [to, setTo] = useState<number | null>(null); // null: to the end of the longest round
-  const [layers, setLayers] = useState<Layers>({ trails: true, cone: true, shots: true, nades: true, kills: true, weapons: false, labels: true, others: false });
+  const [to, setTo] = useState<number | null>(null);
+  const [layers, setLayers] = useState<Layers>({ trails: true, view: true, shots: true, nades: true, kills: true, others: false, grid: true });
   const [view, setView] = useState<number | "all">("all");
-  const [replays, setReplays] = useState<Map<number, Replay>>(new Map());
+  const [replays, setReplays] = useState<Map<string, Replay>>(new Map());
+  const [loaded, setLoaded] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -413,27 +602,12 @@ export function ClipView({ match }: { match: MatchOverview }) {
   const boxRef = useRef<HTMLDivElement>(null);
   const [boxWidth, setBoxWidth] = useState(800);
 
-  // another team: its rounds on the same side as before (the picked rounds belonged to the old team)
-  const lastTeam = useRef(subjectTeam);
   useEffect(() => {
-    if (lastTeam.current === subjectTeam) return;
-    const side = picked.length ? match.timeline.find((r) => r.round === picked[0])?.teams[lastTeam.current]?.side : "terrorist";
-    lastTeam.current = subjectTeam;
-    setPicked(match.timeline.filter((r) => r.teams[subjectTeam]?.side === (side ?? "terrorist")).map((r) => r.round));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subjectTeam]);
-
-  const chooseFormat = (f: "gif" | "mp4") => {
-    setFormat(f);
-    // GIF has no inter-frame compression: smaller frames and fewer of them keep the file sane
-    if (f === "gif") {
-      setFps(10);
-      setOutSize((v) => Math.min(v, 512));
-    } else {
-      setFps(30);
-      setOutSize(768);
-    }
-  };
+    api.library().then((l) => {
+      setLibrary(l.matches.filter((m) => !m.error));
+      setMap((cur) => cur || l.matches.find((m) => m.map)?.map || "");
+    }).catch((e: Error) => setError(e.message));
+  }, []);
 
   useEffect(() => {
     const el = boxRef.current;
@@ -443,56 +617,130 @@ export function ClipView({ match }: { match: MatchOverview }) {
     return () => ro.disconnect();
   }, []);
 
-  // load the picked rounds (cached across renders and with the replay tab)
-  const rounds = useMemo(() => [...picked].sort((a, b) => a - b), [picked]);
+  useEffect(() => {
+    const missing = matchIds.filter((id) => !overviews.has(id));
+    if (!missing.length) return;
+    Promise.all(missing.map((id) => loadOverview(id).then((ov) => [id, ov] as const)))
+      .then((pairs) => setOverviews((cur) => new Map([...cur, ...pairs])))
+      .catch((e: Error) => setError(e.message));
+  }, [matchIds, overviews]);
+
+  const selected = matchIds.map((id) => overviews.get(id)).filter((ov): ov is MatchOverview => !!ov);
+
+  // players over all selected matches (a player is the same steamid in every demo)
+  const roster = useMemo(() => {
+    const byId = new Map<string, { steamid: string; name: string; teams: Map<string, number>; matches: number }>();
+    for (const ov of selected) {
+      for (const p of ov.players) {
+        if (!p.steamid) continue;
+        const id = String(p.steamid);
+        const e = byId.get(id) ?? { steamid: id, name: String(p.name), teams: new Map(), matches: 0 };
+        e.name = String(p.name);
+        e.matches++;
+        const team = String(p.team ?? "");
+        e.teams.set(team, (e.teams.get(team) ?? 0) + 1);
+        byId.set(id, e);
+      }
+    }
+    return [...byId.values()].map((e) => ({ ...e, team: [...e.teams].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "" }))
+      .sort((a, b) => b.matches - a.matches || a.team.localeCompare(b.team) || a.name.localeCompare(b.name));
+  }, [selected]);
+  const teams = useMemo(() => [...new Set(selected.flatMap((ov) => Object.keys(ov.score)))].sort(), [selected]);
+
+  useEffect(() => {
+    if (matchIds.some((id) => !overviews.has(id))) return; // keep the choice while matches load
+    if (subject && (subject.kind === "team" ? teams.includes(subject.team) : roster.some((p) => p.steamid === subject.steamid))) return;
+    setSubject(roster[0] ? { kind: "player", steamid: roster[0].steamid } : teams[0] ? { kind: "team", team: teams[0] } : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roster, teams, subject]);
+
+  // rounds of the subject's team in every selected match
+  const options: RoundOption[] = useMemo(() => {
+    if (!subject) return [];
+    return matchIds.flatMap((id, i) => {
+      const ov = overviews.get(id);
+      if (!ov) return [];
+      const team = subject.kind === "team" ? subject.team : String(ov.players.find((p) => String(p.steamid) === subject.steamid)?.team ?? "");
+      if (!team || !(team in ov.score)) return [];
+      const opponent = Object.keys(ov.score).find((t) => t !== team) ?? null;
+      return ov.timeline.map((r) => ({
+        key: `${id}#${r.round}`, matchId: id, no: i + 1, round: r.round, team, side: r.teams[team]?.side,
+        won: r.winner === team, buy: r.teams[team]?.buy ?? null, opponent,
+      }));
+    });
+  }, [subject, matchIds, overviews]);
+
+  // filters pick the rounds; chips then add or remove single rounds
+  const optionKeys = options.map((o) => o.key).join(",");
+  useEffect(() => {
+    setPicked(new Set(options.filter((o) =>
+      (!sideFilter || o.side === sideFilter) && (!resultFilter || (resultFilter === "won") === o.won) && (!buyFilter || o.buy === buyFilter),
+    ).map((o) => o.key)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [optionKeys, sideFilter, resultFilter, buyFilter]);
+
+  const chosen = useMemo(() => options.filter((o) => picked.has(o.key)), [options, picked]);
+  const chosenKeys = chosen.map((o) => o.key).join(",");
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setLoaded(0);
     setError(null);
-    loadAll(match.id, rounds)
+    loadRounds(chosen, (n) => alive && setLoaded(n))
       .then((m) => alive && setReplays(m))
       .catch((e: Error) => alive && setError(e.message))
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
-  }, [match.id, rounds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chosenKeys]);
 
   const clip: Clip | null = useMemo(() => {
-    if (rounds.some((r) => !replays.has(r))) return null;
-    const tracks: Track[] = rounds.map((round, i) => {
-      const r = replays.get(round)!;
+    if (!subject || !assets || chosen.some((o) => !replays.has(o.key))) return null;
+    const tracks: Track[] = chosen.map((o) => {
+      const r = replays.get(o.key)!;
       const ps = r.players.filter((p) => (subject.kind === "player" ? p.steamid === subject.steamid : p.team === subject.team));
-      return { round, r, players: ps, ids: new Set(ps.map((p) => p.steamid)), side: sideIn(round), won: wonIn(round), color: PALETTE[i % PALETTE.length] };
+      return {
+        key: o.key, matchId: o.matchId, matchNo: o.no, round: o.round, label: matchIds.length > 1 ? `M${o.no} R${o.round}` : `R${o.round}`,
+        r, players: ps, ids: new Set(ps.map((p) => p.steamid)), team: o.team, side: o.side, won: o.won, buy: o.buy, opponent: o.opponent,
+      };
     }).filter((t) => t.players.length > 0);
-    const playerColor = new Map<string, string>();
+    const colors = new Map<string, string>();
     if (subject.kind === "team") {
-      const roster = new Map<string, string>();
-      tracks.forEach((t) => t.players.forEach((p) => roster.set(p.steamid, p.name)));
-      [...roster].sort((a, b) => a[1].localeCompare(b[1])).forEach(([id], i) => playerColor.set(id, PALETTE[i % PALETTE.length]));
+      const names = new Map<string, string>();
+      tracks.forEach((t) => t.players.forEach((p) => names.set(p.steamid, p.name)));
+      [...names].sort((a, b) => a[1].localeCompare(b[1])).forEach(([id], i) => colors.set(id, PLAYER_PALETTE[i % PLAYER_PALETTE.length]));
     }
     const longest = Math.max(0, ...tracks.map((t) => roundLen(t.r)));
-    const name = subject.kind === "player" ? players.find((p) => p.steamid === subject.steamid)?.name ?? "" : subject.team;
-    return {
-      tracks, subject, layout, from, to: Math.min(to ?? longest, longest), layers, playerColor,
-      title: `${name} · ${match.map.replace("de_", "")} · ${tracks.length} р.`,
+    const player = subject.kind === "player" ? roster.find((p) => p.steamid === subject.steamid) : null;
+    const info: ClipInfo = {
+      kind: subject.kind,
+      name: player ? player.name : subject.kind === "team" ? subject.team : "",
+      team: player ? player.team : subject.kind === "team" ? subject.team : "",
+      map, from, to: Math.min(to ?? longest, longest), layout, buy: buyFilter || null,
+      matches: matchIds.map((id, i) => ({ no: i + 1, id, opponent: options.find((o) => o.matchId === id)?.opponent ?? null })),
     };
+    return { tracks, info, summary: summarize(tracks, assets.meta, info), layers, colors };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [replays, rounds, subject, layout, from, to, layers]);
+  }, [replays, chosenKeys, subject, assets, layout, from, to, layers, buyFilter]);
 
   const total = clip ? duration(clip) : 0;
   const levels = assets ? panelLevels(assets.meta, assets.meta.levels.length > 1 ? view : 0) : [0];
-  const size = Math.max(320, Math.min(Math.floor(boxWidth / levels.length), window.innerHeight - 200));
+  const lay = useMemo(() => frameLayout(outSize, levels.length, clip?.summary.caption ?? null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [outSize, levels.length, clip?.summary.caption]);
+  const scale = Math.min(boxWidth / lay.width, (window.innerHeight - 130) / lay.height);
 
   const render = useCallback(() => {
     const c = canvasRef.current;
     if (!c || !assets || !clip) return;
     const ctx = c.getContext("2d")!;
     const dpr = window.devicePixelRatio || 1;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    drawClip(ctx, assets, clip, tRef.current, levels, size);
+    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+    drawFrame(ctx, assets, clip, tRef.current, levels, lay, speed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assets, clip, size, levels.join(",")]);
+  }, [assets, clip, lay, scale, speed, levels.join(",")]);
   useEffect(render, [render, T]);
 
   useEffect(() => {
@@ -527,6 +775,18 @@ export function ClipView({ match }: { match: MatchOverview }) {
     setT(tRef.current);
   };
 
+  const chooseFormat = (f: "gif" | "mp4") => {
+    setFormat(f);
+    // GIF has no inter-frame compression: smaller frames and fewer of them keep the file sane
+    if (f === "gif") {
+      setFps(10);
+      setOutSize((v) => Math.min(v, 512));
+    } else {
+      setFps(30);
+      setOutSize(768);
+    }
+  };
+
   const runExport = async () => {
     if (!clip || !assets) return;
     setPlaying(false);
@@ -535,16 +795,17 @@ export function ClipView({ match }: { match: MatchOverview }) {
     setExported(null);
     try {
       const job = {
-        width: outSize * levels.length, height: outSize, duration: total, speed, fps,
-        render: (ctx: CanvasRenderingContext2D, time: number) => drawClip(ctx, assets, clip, time, levels, outSize),
+        width: lay.width, height: lay.height, duration: total, speed, fps,
+        render: (ctx: CanvasRenderingContext2D, time: number) => drawFrame(ctx, assets, clip, time, levels, lay, speed),
         onProgress: (progress: number) => setExporting({ progress, abort }),
         signal: abort.signal,
       };
-      const blob = format === "gif" ? await exportGif(job) : await exportMp4(job);
-      const base = clip.title.split(" · ")[0].replace(/[^\p{L}\p{N}_-]+/gu, "_");
-      const name = `${match.id}_${base}_${layout}_r${rounds.join("-").slice(0, 40)}.${format}`;
-      download(blob, name);
-      setExported(`${name} — ${(blob.size / 2 ** 20).toFixed(1)} МБ`);
+      const media = format === "gif" ? await exportGif(job) : await exportMp4(job);
+      const base = [clip.info.name, clip.info.map.replace(/^de_/, ""), clip.summary.side, `${clip.tracks.length}r`, clip.info.layout]
+        .join("_").replace(/[^\p{L}\p{N}_+-]+/gu, "_");
+      const zip = await zipWith(`${base}.${format}`, media, `${base}.txt`, clip.summary.text);
+      download(zip, `${base}.zip`);
+      setExported(`${base}.zip — ${(zip.size / 2 ** 20).toFixed(1)} МБ (${format.toUpperCase()} + описание .txt)`);
     } catch (e) {
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
     } finally {
@@ -552,17 +813,40 @@ export function ClipView({ match }: { match: MatchOverview }) {
     }
   };
 
-  const pick = (pred: (round: number) => boolean) => setPicked(match.timeline.map((r) => r.round).filter(pred));
-  const toggle = (round: number) => setPicked((p) => (p.includes(round) ? p.filter((x) => x !== round) : [...p, round]));
+  const toggleRound = (key: string) =>
+    setPicked((p) => {
+      const n = new Set(p);
+      if (n.has(key)) n.delete(key);
+      else n.add(key);
+      return n;
+    });
+  const toggleMatch = (id: string) => setMatchIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  const maps = [...new Set(library.map((m) => m.map).filter(Boolean))].sort();
+  const sameMap = library.filter((m) => m.map === map);
   const frames = Math.ceil((total / speed) * fps);
+  const buys = [...new Set(options.map((o) => o.buy).filter((b): b is string => !!b))];
 
-  if (mapError) return <div className="error">{mapError}</div>;
   return (
     <div className="clip">
       <div className="clip-side">
+        <h3>Демки</h3>
+        <select value={map} onChange={(e) => { setMap(e.target.value); setMatchIds([]); }}>
+          {maps.map((m) => <option key={m} value={m}>{mapPretty(m)}</option>)}
+        </select>
+        <div className="pick-list clip-matches">
+          {sameMap.map((m) => (
+            <label key={m.id} className="pick">
+              <input type="checkbox" checked={matchIds.includes(m.id)} onChange={() => toggleMatch(m.id)} />
+              {matchIds.includes(m.id) && <b> M{matchIds.indexOf(m.id) + 1} </b>}
+              {m.id}
+              <span className="muted small"> {Object.entries(m.score ?? {}).map(([t, s]) => `${t} ${s}`).join(" : ")}</span>
+            </label>
+          ))}
+        </div>
+
         <h3>Кого показывать</h3>
         <select
-          value={subject.kind === "player" ? `p:${subject.steamid}` : `t:${subject.team}`}
+          value={subject ? (subject.kind === "player" ? `p:${subject.steamid}` : `t:${subject.team}`) : ""}
           onChange={(e) => {
             const v = e.target.value;
             setSubject(v.startsWith("p:") ? { kind: "player", steamid: v.slice(2) } : { kind: "team", team: v.slice(2) });
@@ -571,40 +855,55 @@ export function ClipView({ match }: { match: MatchOverview }) {
           <optgroup label="Команда целиком">
             {teams.map((t) => <option key={t} value={`t:${t}`}>{t}</option>)}
           </optgroup>
-          {teams.map((t) => (
-            <optgroup key={t} label={`Игроки — ${t}`}>
-              {players.filter((p) => p.team === t).map((p) => <option key={p.steamid} value={`p:${p.steamid}`}>{p.name}</option>)}
+          {[...new Set(roster.map((p) => p.team))].map((team) => (
+            <optgroup key={team} label={`Игроки — ${team}`}>
+              {roster.filter((p) => p.team === team).map((p) => (
+                <option key={p.steamid} value={`p:${p.steamid}`}>{p.name}{matchIds.length > 1 ? ` (${p.matches} из ${matchIds.length})` : ""}</option>
+              ))}
             </optgroup>
           ))}
         </select>
 
-        <h3>Раунды ({picked.length})</h3>
+        <h3>Раунды ({chosen.length})</h3>
         <div className="row small">
-          <button className="link" onClick={() => pick(() => true)}>все</button>
-          <button className="link" onClick={() => pick((r) => sideIn(r) === "terrorist")}>за T</button>
-          <button className="link" onClick={() => pick((r) => sideIn(r) === "counter-terrorist")}>за CT</button>
-          <button className="link" onClick={() => pick((r) => wonIn(r))}>победы</button>
-          <button className="link" onClick={() => pick((r) => !wonIn(r))}>поражения</button>
-          <button className="link" onClick={() => setPicked([])}>сбросить</button>
+          <select value={sideFilter} onChange={(e) => setSideFilter(e.target.value as Side | "")}>
+            <option value="">обе стороны</option>
+            <option value="terrorist">за T</option>
+            <option value="counter-terrorist">за CT</option>
+          </select>
+          <select value={resultFilter} onChange={(e) => setResultFilter(e.target.value as "" | "won" | "lost")}>
+            <option value="">любой исход</option>
+            <option value="won">победы</option>
+            <option value="lost">поражения</option>
+          </select>
+          <select value={buyFilter} onChange={(e) => setBuyFilter(e.target.value)}>
+            <option value="">любой закуп</option>
+            {buys.map((b) => <option key={b} value={b}>{BUY_LABELS[b] ?? b}</option>)}
+          </select>
         </div>
-        <div className="round-chips">
-          {match.timeline.map((r) => {
-            const side = r.teams[subjectTeam]?.side;
-            const on = picked.includes(r.round);
-            return (
-              <button
-                key={r.round}
-                className={`chip ${on ? "on" : ""} ${r.winner === subjectTeam ? "won" : ""}`}
-                style={{ borderColor: sideColor(side), background: on ? sideColor(side) : undefined }}
-                title={`${sideShort(side)}, ${r.winner === subjectTeam ? "победа" : "поражение"}${r.plant_site ? `, плант ${r.plant_site}` : ""}`}
-                onClick={() => toggle(r.round)}
-              >
-                {r.round}
-              </button>
-            );
-          })}
-        </div>
-        <div className="muted small">Цвет рамки — сторона, жирный номер — раунд выигран.</div>
+        {matchIds.map((id, i) => {
+          const rows = options.filter((o) => o.matchId === id);
+          return (
+            <div key={id}>
+              {matchIds.length > 1 && <div className="muted small">M{i + 1} против {rows[0]?.opponent ?? "?"}</div>}
+              <div className="round-chips">
+                {rows.map((o) => (
+                  <button
+                    key={o.key}
+                    className={`chip ${picked.has(o.key) ? "on" : ""} ${o.won ? "won" : ""}`}
+                    style={{ borderColor: sideColor(o.side), background: picked.has(o.key) ? sideColor(o.side) : undefined }}
+                    title={`${sideShort(o.side)}, ${BUY_LABELS[o.buy ?? ""] ?? o.buy ?? "?"}, ${o.won ? "победа" : "поражение"}`}
+                    onClick={() => toggleRound(o.key)}
+                  >
+                    {o.round}
+                  </button>
+                ))}
+                {!rows.length && <span className="muted small">{overviews.has(id) ? "игрок не играл в этом матче" : "загрузка…"}</span>}
+              </div>
+            </div>
+          );
+        })}
+        <div className="muted small">Рамка — сторона, жирный номер — раунд выигран. Клик добавляет или убирает раунд.</div>
 
         <h3>Как показывать</h3>
         <span className="seg">
@@ -618,8 +917,8 @@ export function ClipView({ match }: { match: MatchOverview }) {
         </div>
         <div className="layers small">
           {([
-            ["trails", "пути"], ["cone", "обзор"], ["shots", "стрельба"], ["nades", "гранаты"], ["kills", "убийства и смерти"],
-            ["weapons", "оружие"], ["labels", "подписи"], ["others", "остальные игроки"],
+            ["trails", "пути"], ["view", "куда смотрит"], ["shots", "стрельба"], ["nades", "гранаты и C4"],
+            ["kills", "фраги и смерти"], ["others", "остальные игроки"], ["grid", "сетка"],
           ] as [keyof Layers, string][]).map(([key, label]) => (
             <label key={key}>
               <input type="checkbox" checked={layers[key]} onChange={(e) => setLayers({ ...layers, [key]: e.target.checked })} /> {label}
@@ -634,15 +933,15 @@ export function ClipView({ match }: { match: MatchOverview }) {
             <button className={format === "gif" ? "on" : ""} onClick={() => chooseFormat("gif")}>GIF</button>
           </span>
           <select value={outSize} onChange={(e) => setOutSize(Number(e.target.value))}>
-            {SIZES.map((v) => <option key={v} value={v}>{v * levels.length}×{v}</option>)}
+            {SIZES.map((v) => <option key={v} value={v}>{v} px</option>)}
           </select>
           <select value={fps} onChange={(e) => setFps(Number(e.target.value))}>
             {[10, 20, 25, 30].map((v) => <option key={v} value={v}>{v} к/с</option>)}
           </select>
         </div>
         <div className="muted small">
-          Скорость {speed}× · {Math.round(total / speed)} с видео · {frames} кадров
-          {format === "gif" && frames * outSize * outSize > 400 * 768 * 768 ? " · большой GIF, лучше MP4 или меньше размер" : ""}
+          {lay.width}×{lay.height} · скорость {speed}× · {Math.round(total / speed)} с · {frames} кадров
+          {format === "gif" && frames * lay.width * lay.height > 400 * 768 * 1000 ? " · большой GIF, лучше MP4 или меньше размер" : ""}
         </div>
         <div className="row">
           {exporting ? (
@@ -651,10 +950,16 @@ export function ClipView({ match }: { match: MatchOverview }) {
               <button onClick={() => exporting.abort.abort()}>Отмена</button>
             </>
           ) : (
-            <button disabled={!clip || !clip.tracks.length || total <= 0} onClick={runExport}>Сохранить {format.toUpperCase()}</button>
+            <button disabled={!clip || !clip.tracks.length || total <= 0} onClick={runExport}>Сохранить {format.toUpperCase()} + описание (.zip)</button>
           )}
         </div>
         {exported && <div className="small ok-text">Сохранено: {exported}</div>}
+        {clip && (
+          <details className="small">
+            <summary>Описание для чата (.txt)</summary>
+            <pre className="clip-text">{clip.summary.text}</pre>
+          </details>
+        )}
         {error && <div className="error small">{error}</div>}
       </div>
 
@@ -675,16 +980,20 @@ export function ClipView({ match }: { match: MatchOverview }) {
             </span>
           )}
         </div>
-        {!clip || !assets ? (
-          <div className="muted" style={{ height: size }}>{loading ? `Загружаю раунды (${replays.size}/${rounds.length})…` : "Выберите раунды."}</div>
+        {mapError ? (
+          <div className="error">{mapError}</div>
+        ) : !matchIds.length ? (
+          <div className="muted">Выберите одну или несколько демок карты.</div>
+        ) : !clip ? (
+          <div className="muted">{loading ? `Загружаю раунды (${loaded}/${chosen.length})…` : chosen.length ? "Готовлю…" : "Нет раундов под фильтр."}</div>
         ) : clip.tracks.length === 0 ? (
           <div className="muted">В выбранных раундах этого игрока нет.</div>
         ) : (
           <canvas
             ref={canvasRef}
-            width={size * levels.length * (window.devicePixelRatio || 1)}
-            height={size * (window.devicePixelRatio || 1)}
-            style={{ width: size * levels.length, height: size, borderRadius: 6 }}
+            width={Math.round(lay.width * scale * (window.devicePixelRatio || 1))}
+            height={Math.round(lay.height * scale * (window.devicePixelRatio || 1))}
+            style={{ width: lay.width * scale, height: lay.height * scale, borderRadius: 6 }}
           />
         )}
       </div>
