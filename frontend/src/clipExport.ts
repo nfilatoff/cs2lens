@@ -131,7 +131,7 @@ export async function exportMp4(job: ExportJob): Promise<Blob> {
 export async function zipWith(mediaName: string, media: Blob, textName: string, text: string): Promise<Blob> {
   const zip = zipSync({
     [mediaName]: [new Uint8Array(await media.arrayBuffer()), { level: 0 }],
-    [textName]: strToU8("﻿" + text.replace(/\n/g, "\r\n")), // BOM and CRLF: opens cleanly in Notepad
+    [textName]: strToU8("\ufeff" + text.replace(/\n/g, "\r\n")), // BOM and CRLF: opens cleanly in Notepad
   });
   return new Blob([zip as Uint8Array<ArrayBuffer>], { type: "application/zip" });
 }

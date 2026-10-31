@@ -3,13 +3,14 @@
 // against whom, round clock), the radar with a grid, and a footer with a caption computed
 // from the map's callouts and a legend. Exports go into a zip with a text file of the facts.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type LibraryMatch, type MatchOverview, type Replay, type Side } from "../api";
+import { api, type MatchOverview, type Replay, type Side } from "../api";
 import { canEncodeVideo, download, exportGif, exportMp4, zipWith } from "../clipExport";
 import { BUY_LABELS, clockOf, summarize, type ClipInfo, type Summary, type Track } from "../clipSummary";
 import {
   RADAR_SIZE, T_COLOR, drawRadar, levelLabel, levelOf, panelLevels, sideColor, sideShort, useMapAssets, worldToPx,
   type MapAssets,
 } from "../radar";
+import { MatchPicker, mapPretty } from "./MatchPicker";
 import { FIRE_SEC, SMOKE_SEC, SMOKE_RADIUS, frameAt, loadReplay, playerState } from "../replayDraw";
 
 const TRAIL_STEP = 3; // draw every n-th frame of a movement trail
@@ -508,10 +509,6 @@ function plural(n: number, one: string, few: string, many: string) {
   return many;
 }
 
-const mapPretty = (map: string) => {
-  const m = map.replace(/^de_/, "");
-  return m.charAt(0).toUpperCase() + m.slice(1);
-};
 
 function title(c: Clip) {
   return [c.info.name, c.summary.side, c.summary.mainZone ?? mapPretty(c.info.map)].filter(Boolean).join(" · ");
@@ -565,7 +562,6 @@ const SIZES = [512, 768, 1024];
 
 // ---- component ----
 export function ClipView({ initial }: { initial?: MatchOverview }) {
-  const [library, setLibrary] = useState<LibraryMatch[]>([]);
   const [map, setMap] = useState(initial?.map ?? "");
   const [matchIds, setMatchIds] = useState<string[]>(initial ? [initial.id] : []);
   const [overviews, setOverviews] = useState<Map<string, MatchOverview>>(new Map(initial ? [[initial.id, initial]] : []));
@@ -601,13 +597,6 @@ export function ClipView({ initial }: { initial?: MatchOverview }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const [boxWidth, setBoxWidth] = useState(800);
-
-  useEffect(() => {
-    api.library().then((l) => {
-      setLibrary(l.matches.filter((m) => !m.error));
-      setMap((cur) => cur || l.matches.find((m) => m.map)?.map || "");
-    }).catch((e: Error) => setError(e.message));
-  }, []);
 
   useEffect(() => {
     const el = boxRef.current;
@@ -820,9 +809,6 @@ export function ClipView({ initial }: { initial?: MatchOverview }) {
       else n.add(key);
       return n;
     });
-  const toggleMatch = (id: string) => setMatchIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
-  const maps = [...new Set(library.map((m) => m.map).filter(Boolean))].sort();
-  const sameMap = library.filter((m) => m.map === map);
   const frames = Math.ceil((total / speed) * fps);
   const buys = [...new Set(options.map((o) => o.buy).filter((b): b is string => !!b))];
 
@@ -830,19 +816,7 @@ export function ClipView({ initial }: { initial?: MatchOverview }) {
     <div className="clip">
       <div className="clip-side">
         <h3>Демки</h3>
-        <select value={map} onChange={(e) => { setMap(e.target.value); setMatchIds([]); }}>
-          {maps.map((m) => <option key={m} value={m}>{mapPretty(m)}</option>)}
-        </select>
-        <div className="pick-list clip-matches">
-          {sameMap.map((m) => (
-            <label key={m.id} className="pick">
-              <input type="checkbox" checked={matchIds.includes(m.id)} onChange={() => toggleMatch(m.id)} />
-              {matchIds.includes(m.id) && <b> M{matchIds.indexOf(m.id) + 1} </b>}
-              {m.id}
-              <span className="muted small"> {Object.entries(m.score ?? {}).map(([t, s]) => `${t} ${s}`).join(" : ")}</span>
-            </label>
-          ))}
-        </div>
+        <MatchPicker map={map} setMap={setMap} ids={matchIds} setIds={setMatchIds} onError={setError} />
 
         <h3>Кого показывать</h3>
         <select

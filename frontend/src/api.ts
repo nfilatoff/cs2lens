@@ -79,6 +79,69 @@ export interface Points {
   kills: Row[];
   utility: Row[];
   utility_error: string | null;
+  shots: Row[];
+  damages: Row[];
+  blinds: Row[];
+  plants: Row[];
+}
+
+export interface Movement {
+  cell: number; // radar px per cell
+  levels: [number, number, number][][]; // per level: [i, j, samples]
+  samples: number;
+  player_seconds: number;
+}
+
+export interface Throw {
+  id: string;
+  round_num: number;
+  tick: number;
+  sec: number;
+  steamid: string;
+  name: string;
+  team: string | null;
+  side: Side;
+  type: string; // smoke | flashbang | he | molotov | decoy
+  weapon: string;
+  technique: string | null; // stand | walk | run | jump | run_jump
+  speed: number | null;
+  x: number;
+  y: number;
+  z: number;
+  pitch: number;
+  yaw: number;
+  land_x: number | null;
+  land_y: number | null;
+  land_z: number | null;
+  flight_sec: number | null;
+  throw_zone: string | null;
+  land_zone: string | null;
+}
+
+export interface Throws {
+  map: string;
+  tick_rate: number;
+  playdemo: string | null; // demo path for CS2's playdemo, when the demo is inside the game folder
+  throws: Throw[];
+}
+
+export interface CS2Status {
+  game_dir: string | null;
+  cfg_dir: string | null;
+  port: number;
+  connected: boolean;
+  loaded: string | null;
+  state: { phase: "idle" | "launching" | "loading" | "done" | "error"; message: string; time: number };
+}
+
+export interface Lineup {
+  x: number;
+  y: number;
+  z: number;
+  pitch: number;
+  yaw: number;
+  weapon: string;
+  label: string;
 }
 
 export interface Level {
@@ -264,6 +327,19 @@ export const api = {
   match: (id: string) => request<MatchOverview>(m(id)),
   tactics: (id: string) => request<TacticsResult>(`${m(id)}/tactics`),
   points: (id: string) => request<Points>(`${m(id)}/points`),
+  movement: (id: string, f: { team: string; side: string; player: string; round_from: number; round_to: number; t_from: number; t_to: number }) =>
+    request<Movement>(`${m(id)}/movement?${new URLSearchParams(Object.entries(f).map(([k, v]) => [k, String(v)]))}`),
+  throws: (id: string) => request<Throws>(`${m(id)}/throws`),
+  cs2: () => request<CS2Status>("/api/cs2"),
+  cs2Settings: (game_dir: string | null, port: number | null) => request<CS2Status>("/api/cs2/settings", json({ game_dir, port })),
+  cs2Open: (map: string, lineup: Lineup, reload = false) =>
+    request<{ mode: "netcon" | "launch"; steam_url: string | null; cfg: string | null }>("/api/cs2/open", json({ map, lineup, reload })),
+  cs2List: (map: string, name: string, lineups: Lineup[], install: boolean) =>
+    request<{ text: string; file: string; exec: string; path: string | null }>("/api/cs2/list", json({ map, name, lineups, install })),
+  cs2RunList: (map: string, name: string) =>
+    request<{ mode: "netcon" | "launch"; steam_url: string | null }>("/api/cs2/run-list", json({ map, name })),
+  cs2Demo: (match_id: string, tick: number, player: string) =>
+    request<{ mode: "netcon" | "launch"; steam_url: string | null }>("/api/cs2/demo", json({ match_id, tick, player })),
   replay: (id: string, round: number) => request<Replay>(`${m(id)}/rounds/${round}/replay`),
   mapMeta: (map: string) => request<MapMeta>(`/api/maps/${map}`),
   aggregate: (ids: string[], aliases: Record<string, string>) =>

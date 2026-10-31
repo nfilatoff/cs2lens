@@ -3,8 +3,9 @@ import { LibraryPage } from "./pages/Library";
 import { MatchPage } from "./pages/Match";
 import { AggregatePage } from "./pages/Aggregate";
 import { ClipView } from "./components/ClipView";
+import { LineupsView } from "./components/LineupsView";
 
-// Hash routes: #/ (library), #/match/<id>/<tab>[/<round>[/<seconds after freeze end>]], #/aggregate, #/clip
+// Hash routes: #/ (library), #/match/<id>/<tab>[/<round>[/<seconds after freeze end>]], #/aggregate, #/clip, #/lineups
 function useHash(): string[] {
   const read = () => window.location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   const [parts, setParts] = useState(read);
@@ -38,6 +39,9 @@ export function App() {
           <a href="#/clip" className={page === "clip" ? "active" : ""}>
             Клипы
           </a>
+          <a href="#/lineups" className={page === "lineups" ? "active" : ""}>
+            Лайнапы
+          </a>
         </nav>
       </header>
       <main>
@@ -48,6 +52,10 @@ export function App() {
         ) : page === "clip" ? (
           <div className="page">
             <ClipView />
+          </div>
+        ) : page === "lineups" ? (
+          <div className="page">
+            <LineupsView />
           </div>
         ) : (
           <LibraryPage />

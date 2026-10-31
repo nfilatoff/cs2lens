@@ -23,9 +23,11 @@ from fastapi.staticfiles import StaticFiles
 
 from cs2lens.aggregate import aggregate
 from cs2lens.app.archives import is_archive, unpack
+from cs2lens.app.cs2 import CS2Bridge
 from cs2lens.app.jobs import JobQueue
 from cs2lens.context import load_match, with_round
 from cs2lens.extract import add_replay, extract
+from cs2lens.lineups import MAP_RE, PRACTICE, cfg_name, lineup_cfg, lineup_commands, list_cfg, safe_text, throws
 from cs2lens.maps import load_map_config
 from cs2lens.replay import round_payload
 from cs2lens.tactics import tactics, userid_map, utility_events
@@ -54,13 +56,27 @@ class Library:
         self.out.mkdir(parents=True, exist_ok=True)
         self.settings_path = out / "library.json"
 
-    def folders(self) -> list[str]:
+    def settings(self) -> dict:
         if not self.settings_path.exists():
-            return []
-        return json.loads(self.settings_path.read_text(encoding="utf-8")).get("folders", [])
+            return {}
+        return json.loads(self.settings_path.read_text(encoding="utf-8"))
+
+    def setting(self, key: str):
+        return self.settings().get(key)
+
+    def set_setting(self, key: str, value) -> None:
+        data = self.settings()
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
+        self.settings_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def folders(self) -> list[str]:
+        return self.settings().get("folders", [])
 
     def set_folders(self, folders: list[str]) -> None:
-        self.settings_path.write_text(json.dumps({"folders": folders}, indent=2), encoding="utf-8")
+        self.set_setting("folders", folders)
 
     def match_dir(self, match_id: str) -> Path:
         d = self.out / match_id
@@ -165,25 +181,111 @@ def _tactics(d: Path, _stamp: float) -> dict:
     return result
 
 
+def _sec(df: pl.DataFrame, rate: float) -> pl.DataFrame:
+    """Seconds after the freeze end, for rows that went through ``with_round``."""
+    return df.with_columns(sec=((pl.col("tick") - pl.col("freeze_end_tick")) / rate).round(1))
+
+
+def _teams_for(df: pl.DataFrame, teams: pl.DataFrame, *roles: str) -> pl.DataFrame:
+    for role in roles:
+        df = df.join(teams.rename({"steamid": f"{role}_steamid", "team": f"{role}_team"}), on=f"{role}_steamid", how="left")
+    return df
+
+
 @lru_cache(maxsize=64)
 def _points(d: Path, _stamp: float) -> dict:
-    m = load_match(d, extra_tables=("fires", "shots"))
+    """Event positions for the heatmaps: kills, utility, gun shots, damage, blinds, plants."""
+    m = load_match(d, extra_tables=("fires", "shots", "damages", "blinds"))
+    rate = m.tick_rate
     names = m.data["players"].select("steamid", "name")
-    kills = with_round(m.data["kills"], m.rounds).join(
-        m.teams.rename({"steamid": "attacker_steamid", "team": "attacker_team"}), on="attacker_steamid", how="left"
-    ).join(m.teams.rename({"steamid": "victim_steamid", "team": "victim_team"}), on="victim_steamid", how="left")
+    kills = _sec(_teams_for(with_round(m.data["kills"], m.rounds), m.teams, "attacker", "victim"), rate)
+    # opening duel: the first kill between the two teams in each round
+    kills = kills.with_columns(
+        opening=(pl.col("tick") == pl.col("tick").filter(pl.col("attacker_team") != pl.col("victim_team")).min().over("round_num"))
+        & (pl.col("attacker_team") != pl.col("victim_team"))
+    )
     kills = kills.select(
-        "round_num", "tick", "weapon", "headshot",
+        "round_num", "tick", "sec", "weapon", "headshot", "opening",
         "attacker_steamid", "attacker_name", "attacker_side", "attacker_team", "attacker_x", "attacker_y", "attacker_z",
         "victim_steamid", "victim_name", "victim_side", "victim_team", "victim_x", "victim_y", "victim_z",
     )
+    shots = _sec(with_round(m.data["shots"], m.rounds), rate).with_columns(weapon=pl.col("weapon").str.replace("^weapon_", ""))
+    shots = shots.filter(~pl.col("weapon").str.contains("knife|bayonet|grenade|flashbang|molotov|decoy|c4")).join(m.teams, on="steamid", how="left")
+    shots = shots.select("round_num", "sec", "steamid", "name", "side", "team", "weapon",
+                         x=pl.col("x").round(0), y=pl.col("y").round(0), z=pl.col("z").round(0))
+    dmg = _sec(_teams_for(with_round(m.data["damages"], m.rounds), m.teams, "attacker", "victim"), rate).select(
+        "round_num", "sec", "weapon", dmg=pl.col("dmg_health"),
+        attacker_name="attacker_name", attacker_side="attacker_side", attacker_team="attacker_team",
+        attacker_x=pl.col("attacker_x").round(0), attacker_y=pl.col("attacker_y").round(0), attacker_z=pl.col("attacker_z").round(0),
+        victim_name="victim_name", victim_side="victim_side", victim_team="victim_team",
+        victim_x=pl.col("victim_x").round(0), victim_y=pl.col("victim_y").round(0), victim_z=pl.col("victim_z").round(0),
+    )
+    blinds = _sec(_teams_for(with_round(m.data["blinds"], m.rounds), m.teams, "attacker", "victim"), rate).filter(
+        pl.col("attacker_team") != pl.col("victim_team")
+    ).select(
+        "round_num", "sec", duration=pl.col("duration").round(2),
+        attacker_name="attacker_name", attacker_side="attacker_side", attacker_team="attacker_team",
+        attacker_x=pl.col("attacker_x").round(0), attacker_y=pl.col("attacker_y").round(0), attacker_z=pl.col("attacker_z").round(0),
+        victim_name="victim_name", victim_side="victim_side", victim_team="victim_team",
+        victim_x=pl.col("victim_x").round(0), victim_y=pl.col("victim_y").round(0), victim_z=pl.col("victim_z").round(0),
+    )
+    plants = _sec(with_round(m.data["bomb"].filter(pl.col("event") == "finish_plant"), m.rounds), rate).join(m.teams, on="steamid", how="left")
+    plants = plants.select("round_num", "sec", "name", "team", site=pl.col("bombsite"), side=pl.lit("terrorist"),
+                           x=pl.col("x").round(0), y=pl.col("y").round(0), z=pl.col("z").round(0))
     try:
         util = utility_events(m, userid_map(m)).join(names, on="steamid", how="left")
         util = util.select("round_num", "tick", "sec", "type", "x", "y", "z", "steamid", "name", "team", "side")
         util_error = None
     except ValueError as e:
         util, util_error = pl.DataFrame(), str(e)
-    return {"map": m.map_name, "kills": rows(kills), "utility": rows(util), "utility_error": util_error}
+    return {"map": m.map_name, "kills": rows(kills), "utility": rows(util), "utility_error": util_error,
+            "shots": rows(shots), "damages": rows(dmg), "blinds": rows(blinds), "plants": rows(plants)}
+
+
+HEAT_CELL = 4  # radar px per movement-heatmap cell (1024 px radar -> 256 x 256)
+
+
+@lru_cache(maxsize=2)
+def _frames(d: Path, _stamp: float) -> tuple[pl.DataFrame, float, str]:
+    """Alive player positions over the whole match with round, seconds after freeze end and team."""
+    m = load_match(d)
+    path = d / "replay.parquet"
+    src = pl.read_parquet(path, columns=["tick", "steamid", "name", "side", "x", "y", "z", "health"]) if path.exists() else m.data["snapshots"]
+    f = src.select("tick", "steamid", "name", "side", "x", "y", "z", "health").filter(pl.col("health") > 0)
+    f = _sec(with_round(f, m.rounds), m.tick_rate).join(m.teams, on="steamid", how="inner")
+    step = float(f["tick"].unique().sort().diff().drop_nulls().min() or 1)
+    return f.select("round_num", "sec", "name", "side", "team", "x", "y", "z"), step / m.tick_rate, m.map_name
+
+
+@lru_cache(maxsize=256)
+def _movement(d: Path, _stamp: float, team: str, side: str, player: str, r0: int, r1: int, t0: float, t1: float) -> dict:
+    f, dt, map_name = _frames(d, _stamp)
+    f = f.filter(pl.col("round_num").is_between(r0, r1) & pl.col("sec").is_between(t0, t1))
+    if team:
+        f = f.filter(pl.col("team") == team)
+    if side:
+        f = f.filter(pl.col("side") == side)
+    if player:
+        f = f.filter(pl.col("name") == player)
+    meta = _map_meta(map_name)
+    out = []
+    for lv in meta["levels"]:
+        g = f.filter((pl.col("z") >= lv["z_min"]) & (pl.col("z") < lv["z_max"])) if len(meta["levels"]) > 1 else f
+        cells = (
+            g.select(
+                i=((pl.col("x") - meta["pos_x"]) / meta["scale"] / HEAT_CELL).floor().cast(pl.Int32),
+                j=((meta["pos_y"] - pl.col("y")) / meta["scale"] / HEAT_CELL).floor().cast(pl.Int32),
+            )
+            .filter(pl.col("i").is_between(0, 1024 // HEAT_CELL - 1) & pl.col("j").is_between(0, 1024 // HEAT_CELL - 1))
+            .group_by("i", "j").len()
+        )
+        out.append(cells.select("i", "j", "len").rows())
+    return {"cell": HEAT_CELL, "levels": out, "samples": f.height, "player_seconds": round(f.height * dt)}
+
+
+@lru_cache(maxsize=64)
+def _throws(d: Path, _stamp: float) -> list[dict]:
+    return rows(throws(d))
 
 
 def _radar_file(name: str) -> Path | None:
@@ -232,6 +334,7 @@ def _map_meta(map_name: str) -> dict:
 def create_app(out: str | Path = "out") -> FastAPI:
     lib = Library(Path(out))
     jobs = JobQueue()
+    cs2 = CS2Bridge(lib.setting, lib.set_setting)
     api = FastAPI(title="cs2lens")
 
     def queue_extract(demo: Path) -> dict:
@@ -395,6 +498,101 @@ def create_app(out: str | Path = "out") -> FastAPI:
         except KeyError as e:
             raise HTTPException(404, str(e)) from e
         return Response(payload, media_type="application/json", headers={"Content-Encoding": "gzip", "Cache-Control": "no-cache"})
+
+    @api.get("/api/matches/{match_id}/movement")
+    def match_movement(
+        match_id: str, team: str = "", side: str = "", player: str = "",
+        round_from: int = 1, round_to: int = 999, t_from: float = -30, t_to: float = 300,
+    ) -> dict:
+        d = lib.match_dir(match_id)
+        return _movement(d, _stamp(d), team, side, player, round_from, round_to, t_from, t_to)
+
+    @api.get("/api/matches/{match_id}/throws")
+    def match_throws(match_id: str) -> dict:
+        d = lib.match_dir(match_id)
+        manifest = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        demo, game = lib.demo_for(d), cs2.game_dir()
+        playdemo = None
+        if demo and game:
+            try:  # playdemo takes a path relative to game/csgo
+                playdemo = demo.resolve().relative_to(game.resolve()).with_suffix("").as_posix()
+            except ValueError:
+                pass
+        return {"map": manifest["header"].get("map_name"), "tick_rate": manifest["tick_rate"],
+                "playdemo": playdemo, "throws": _throws(d, _stamp(d))}
+
+    # ---- CS2 ----
+    def check_map(map_name: str) -> str:
+        if not MAP_RE.match(map_name or ""):
+            raise HTTPException(400, f"bad map name: {map_name!r}")
+        return map_name
+
+    def check_lineup(lu: dict) -> dict:
+        try:
+            out = {k: float(lu[k]) for k in ("x", "y", "z", "pitch", "yaw")}
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(400, f"bad lineup: {e}") from e
+        if not all(abs(v) < 1e5 for v in out.values()):
+            raise HTTPException(400, "lineup coordinates out of range")
+        return out | {"weapon": str(lu.get("weapon") or ""), "label": safe_text(str(lu.get("label") or ""))}
+
+    @api.get("/api/cs2")
+    def cs2_status() -> dict:
+        return cs2.status()
+
+    @api.post("/api/cs2/settings")
+    def cs2_settings(game_dir: str | None = Body(None), port: int | None = Body(None)) -> dict:
+        try:
+            cs2.configure(game_dir, port)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return cs2.status()
+
+    @api.post("/api/cs2/open")
+    def cs2_open(map: str = Body(...), lineup: dict = Body(...), reload: bool = Body(False)) -> dict:
+        """Teleport the player in CS2 to a lineup (loading the map, launching CS2 if needed)."""
+        map_name, lu = check_map(map), check_lineup(lineup)
+        path = cs2.write_cfg("cs2lens_lineup", lineup_cfg(map_name, lu, lu["label"]))
+        commands = [c for c in PRACTICE if not c.startswith("//")] + lineup_commands(lu) + [f"echo cs2lens: {lu['label']}"]
+        return cs2.run(f"map {map_name}", commands, lu["label"] or "лайнап", reload) | {"cfg": str(path) if path else None}
+
+    @api.post("/api/cs2/list")
+    def cs2_list(
+        map: str = Body(...), name: str = Body("lineups"), lineups: list[dict] = Body(...), install: bool = Body(False),
+        next_key: str = Body("]"), prev_key: str = Body("["),
+    ) -> dict:
+        """A practice config with many lineups (``]`` / ``[`` cycle); written into CS2 with ``install``."""
+        map_name = check_map(map)
+        keys = {next_key, prev_key}
+        if len(keys) != 2 or not all(re.fullmatch(r"[A-Za-z0-9\[\]\-=,./]|f\d{1,2}", k) for k in keys):
+            raise HTTPException(400, "keys: one character or f1-f12")
+        lus = [check_lineup(lu) | {"label": safe_text(str(lu.get("label") or ""))} for lu in lineups[:500]]
+        if not lus:
+            raise HTTPException(400, "no lineups")
+        exec_name = cfg_name(name)
+        text = list_cfg(map_name, name, lus, next_key, prev_key)
+        path = cs2.write_cfg(exec_name, text) if install else None
+        if install and path is None:
+            raise HTTPException(404, "CS2 game folder not found; set it in the CS2 settings or download the .cfg")
+        return {"text": text, "file": f"{exec_name}.cfg", "exec": f"exec {exec_name}", "path": str(path) if path else None}
+
+    @api.post("/api/cs2/run-list")
+    def cs2_run_list(map: str = Body(...), name: str = Body("lineups")) -> dict:
+        """Load the map in CS2 and exec an installed practice list."""
+        map_name = check_map(map)
+        exec_name = cfg_name(name)
+        return cs2.run(f"map {map_name}", [f"exec {exec_name}"], exec_name)
+
+    @api.post("/api/cs2/demo")
+    def cs2_demo(match_id: str = Body(...), tick: int = Body(...), player: str = Body("")) -> dict:
+        """Open the match demo in CS2 a few seconds before ``tick``, watching ``player``."""
+        info = match_throws(match_id)
+        if not info["playdemo"]:
+            raise HTTPException(404, "the demo is not inside the CS2 game folder, so CS2 cannot open it")
+        commands = [f"demo_gototick {max(0, int(tick))}"]
+        if player:
+            commands.append(f'spec_player "{safe_text(player, 40)}"')
+        return cs2.run(f"playdemo {info['playdemo']}", commands, f"демка, тик {tick}")
 
     @api.get("/api/maps/{map_name}")
     def map_meta(map_name: str) -> dict:
