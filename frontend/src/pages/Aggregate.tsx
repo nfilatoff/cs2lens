@@ -67,7 +67,7 @@ export function AggregatePage() {
 
   return (
     <div className="page">
-      <h2>Несколько матчей</h2>
+      <div className="pagehead"><h1>Несколько матчей</h1><div className="sub">Суммарная статистика команд и игроков по выбранным матчам</div></div>
       <div className="grid2">
         <div>
           <h3>Матчи</h3>

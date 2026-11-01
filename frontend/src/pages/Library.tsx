@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type Job, type Library, type LibraryMatch } from "../api";
+import { api, radarUrl, type Job, type Library, type LibraryMatch } from "../api";
 import { go } from "../App";
 
 const ACCEPT = ".dem,.zip,.rar,.7z,.tar,.tgz,.gz,.bz2,.xz,.zst";
@@ -148,6 +148,11 @@ export function LibraryPage() {
         </div>
       )}
 
+      <div className="pagehead">
+        <h1>Библиотека</h1>
+        <div className="sub">Разобранные матчи и демки в ваших папках</div>
+      </div>
+
       <div className="lib-filters">
         <select value={mapFilter} onChange={(e) => setMapFilter(e.target.value)}>
           <option value="">все карты</option>
@@ -164,12 +169,13 @@ export function LibraryPage() {
       </div>
 
       <section>
-        <h2>Матчи ({matches.length}{matches.length !== lib.matches.length ? ` из ${lib.matches.length}` : ""})</h2>
+        <h2>Матчи <span className="count">{matches.length}{matches.length !== lib.matches.length ? ` из ${lib.matches.length}` : ""}</span></h2>
         <div className="muted small">Разобранные демки лежат в {lib.out}</div>
         <div className="cards">
           {matches.map((m) => {
             const job = jobs.find((j) => j.match_id === m.id && j.kind === "replay" && j.status !== "done");
             const teamsOf = Object.entries(m.score ?? {});
+            const top = Math.max(...teamsOf.map(([, s]) => s));
             return (
               <div key={m.id} className="card clickable" onClick={() => go("match", m.id, "overview")}>
                 <button
@@ -183,18 +189,20 @@ export function LibraryPage() {
                 >
                   ✕
                 </button>
-                <div className="card-map">{mapLabel(m.map)}</div>
-                <div className="card-title">{m.id}</div>
+                <div className="card-banner" style={m.map ? { backgroundImage: `url(${radarUrl(m.map)})` } : undefined}>
+                  <div className="card-map">{mapLabel(m.map)}</div>
+                </div>
                 {teamsOf.length > 0 && (
                   <div className="card-score">
-                    {teamsOf.map(([t, s], i) => (
-                      <span key={t}>
-                        {i > 0 && " : "}
-                        <b>{s}</b> {t}
-                      </span>
+                    {teamsOf.map(([t, s]) => (
+                      <div key={t} className={`card-team ${s === top && teamsOf.some(([, o]) => o < s) ? "win" : ""}`}>
+                        <span>{t}</span>
+                        <b>{s}</b>
+                      </div>
                     ))}
                   </div>
                 )}
+                <div className="card-title" title={m.id}>{m.id}</div>
                 {m.error && <div className="error small">{m.error}</div>}
                 <div className="card-foot">
                   {m.has_replay ? (
@@ -222,7 +230,7 @@ export function LibraryPage() {
       </section>
 
       <section>
-        <h2>Демки</h2>
+        <h2>Демки <span className="count">{demos.length}</span></h2>
         <div className="row">
           <input
             className="grow"

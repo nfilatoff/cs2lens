@@ -4,6 +4,7 @@ import { MatchPage } from "./pages/Match";
 import { AggregatePage } from "./pages/Aggregate";
 import { ClipView } from "./components/ClipView";
 import { LineupsView } from "./components/LineupsView";
+import { IconFilm, IconGrenade, IconLibrary, IconLogo, IconStats } from "./components/Icons";
 
 // Hash routes: #/ (library), #/match/<id>/<tab>[/<round>[/<seconds after freeze end>]], #/aggregate, #/clip, #/lineups
 function useHash(): string[] {
@@ -23,44 +24,55 @@ export const go = (...parts: (string | number)[]) => {
 
 export function App() {
   const [page, ...rest] = useHash();
+  const nav: [string, string, typeof IconLibrary][] = [
+    ["", "Библиотека", IconLibrary],
+    ["aggregate", "Матчи", IconStats],
+    ["clip", "Клипы", IconFilm],
+    ["lineups", "Лайнапы", IconGrenade],
+  ];
+  const active = page === "match" ? "" : page ?? "";
   return (
-    <div className="app">
-      <header className="topbar">
-        <a className="brand" href="#/">
-          cs2lens
+    <div className="shell">
+      <aside className="sidebar">
+        <a className="logo" href="#/" title="cs2lens">
+          <IconLogo />
         </a>
         <nav>
-          <a href="#/" className={!page ? "active" : ""}>
-            Библиотека
-          </a>
-          <a href="#/aggregate" className={page === "aggregate" ? "active" : ""}>
-            Несколько матчей
-          </a>
-          <a href="#/clip" className={page === "clip" ? "active" : ""}>
-            Клипы
-          </a>
-          <a href="#/lineups" className={page === "lineups" ? "active" : ""}>
-            Лайнапы
-          </a>
+          {nav.map(([key, label, Icon]) => (
+            <a key={key} href={`#/${key}`} className={`navitem ${active === key ? "active" : ""}`}>
+              <Icon />
+              {label}
+            </a>
+          ))}
         </nav>
-      </header>
-      <main>
-        {page === "match" && rest[0] ? (
-          <MatchPage id={rest[0]} tab={rest[1] ?? "overview"} round={rest[2] ? Number(rest[2]) : undefined} at={rest[3] ? Number(rest[3]) : undefined} />
-        ) : page === "aggregate" ? (
-          <AggregatePage />
-        ) : page === "clip" ? (
-          <div className="page">
-            <ClipView />
-          </div>
-        ) : page === "lineups" ? (
-          <div className="page">
-            <LineupsView />
-          </div>
-        ) : (
-          <LibraryPage />
-        )}
-      </main>
+      </aside>
+      <div className="content">
+        <header className="topbar">
+          <a className="wordmark" href="#/">
+            CS2<b>LENS</b>
+            <small>Анализатор демок</small>
+          </a>
+        </header>
+        <main>
+          {page === "match" && rest[0] ? (
+            <MatchPage id={rest[0]} tab={rest[1] ?? "overview"} round={rest[2] ? Number(rest[2]) : undefined} at={rest[3] ? Number(rest[3]) : undefined} />
+          ) : page === "aggregate" ? (
+            <AggregatePage />
+          ) : page === "clip" ? (
+            <div className="page">
+              <div className="pagehead"><h1>Клипы</h1><div className="sub">GIF и видео по игроку или команде из одной или нескольких демок</div></div>
+              <ClipView />
+            </div>
+          ) : page === "lineups" ? (
+            <div className="page">
+              <div className="pagehead"><h1>Лайнапы</h1><div className="sub">Все броски гранат по картам с выгрузкой и запуском в CS2</div></div>
+              <LineupsView />
+            </div>
+          ) : (
+            <LibraryPage />
+          )}
+        </main>
+      </div>
     </div>
   );
 }

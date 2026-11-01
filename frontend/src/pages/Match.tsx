@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type MatchOverview, type TacticsResult, type TimelineRound } from "../api";
+import { api, radarUrl, type MatchOverview, type TacticsResult, type TimelineRound } from "../api";
 import { go } from "../App";
 import { DataTable } from "../components/DataTable";
 import { ReplayView } from "../components/Replay";
@@ -29,6 +29,8 @@ export const REASONS: Record<string, string> = {
 };
 const REASON_ICON: Record<string, string> = { target_bombed: "💥", bomb_defused: "✂", target_saved: "⏱" };
 
+const scoreClass = (mine: number, other: number) => (mine > other ? "win" : mine < other ? "lose" : "");
+
 export function MatchPage({ id, tab, round, at }: { id: string; tab: string; round?: number; at?: number }) {
   const [match, setMatch] = useState<MatchOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -43,17 +45,29 @@ export function MatchPage({ id, tab, round, at }: { id: string; tab: string; rou
 
   return (
     <div className="page">
-      <div className="match-head">
-        <div className="match-map">{match.map}</div>
-        <div className="match-score">
-          {teams.map(([t, s], i) => (
-            <span key={t}>
-              {i > 0 && <span className="muted"> : </span>}
-              <span className="team-name">{t}</span> <b>{s}</b>
-            </span>
-          ))}
+      <div className="mhero" style={{ backgroundImage: `url(${radarUrl(match.map)})` }}>
+        <div className="crumbs">
+          <a href="#/">Библиотека</a>
+          <span>/</span>
+          <span className="match-map">{match.map.replace(/^de_/, "")}</span>
+          <span className="pill">{match.timeline.length} раундов</span>
         </div>
-        <div className="muted small">{match.id}</div>
+        <div className="mhero-main">
+          {teams.length === 2 ? (
+            <>
+              <div className="mteam a">{teams[0][0]}</div>
+              <div className="mscore">
+                <span className={scoreClass(teams[0][1], teams[1][1])}>{teams[0][1]}</span>
+                <span className="vs">:</span>
+                <span className={scoreClass(teams[1][1], teams[0][1])}>{teams[1][1]}</span>
+              </div>
+              <div className="mteam b">{teams[1][0]}</div>
+            </>
+          ) : (
+            <div className="mteam">{teams.map(([t, s]) => `${t} ${s}`).join(" · ")}</div>
+          )}
+        </div>
+        <div className="mhero-note">{match.id}</div>
       </div>
       <div className="tabs">
         {TABS.map(([key, label]) => (
@@ -122,7 +136,7 @@ function Overview({ match }: { match: MatchOverview }) {
   const ts = match.team_stats;
   return (
     <div>
-      <h3>Ход матча</h3>
+      <h2>Ход матча</h2>
       <div className="muted small">Клик по раунду открывает 2D-реплей. Цвет — сторона победителя.</div>
       <RoundStrip match={match} />
       <DataTable
