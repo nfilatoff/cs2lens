@@ -1,12 +1,30 @@
+# Python
 .venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+
+# Frontend
+node_modules/
+dist/
+cs2lens/app/static/
+
+# Data: demos, archives and parsed output
 out/
 *.dem
 *.dem.zst
 *.rar
-__pycache__/
-*.egg-info/
-.pytest_cache/
-node_modules/
-dist/
+*.zip
+*.7z
+
+# Local / editor
 .env
-cs2lens/app/static/
+*.log
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+desktop.ini
+start-cs2lens.cmd

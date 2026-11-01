@@ -19,10 +19,24 @@
 
 ## Установка
 
+### Одной командой (Windows)
+
+Скрипт [`install.ps1`](install.ps1) ставит всё необходимое: при отсутствии — Git, Python 3.13 и Node.js LTS (через winget), затем клонирует проект, создаёт `.venv`, собирает фронтенд, скачивает радары awpy и кладёт ярлык `cs2lens` на рабочий стол. Повторный запуск обновляет установку.
+
+```powershell
+irm https://raw.githubusercontent.com/nfilatoff/cs2lens/main/install.ps1 -OutFile install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+По умолчанию проект ставится в `%LOCALAPPDATA%\cs2lens`; другая папка — `-InstallDir 'D:\cs2lens'`. Если запустить скрипт из уже клонированного репозитория, он использует его. Ключи: `-CheckOnly` (только проверить), `-SkipRadars`, `-NoShortcut`, `-Dev` (с pytest), `-Launch` (запустить после установки).
+
+### Вручную
+
 Нужны Python 3.13 (подойдёт ≥ 3.11) и Node.js (≥ 20) для сборки фронтенда.
 
 ```powershell
-cd D:\csdemoanalyzer
+git clone https://github.com/nfilatoff/cs2lens.git
+cd cs2lens
 python -m venv .venv
 .venv\Scripts\activate
 pip install -e ".[dev]"          # cs2lens + awpy, polars, matplotlib, typer, fastapi, uvicorn, zstandard; dev — pytest
