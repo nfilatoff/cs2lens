@@ -410,7 +410,7 @@ function TeamPanel({ states, title, color }: { states: PlayerState[]; title: str
           <div className="pl-weapon">
             {[
               // the active gun is highlighted in the inventory line below; other active items are named here
-              s.hp <= 0 ? "мёртв" : s.p.inv && (s.weapon === s.primary || s.weapon === s.secondary) ? null : weaponName(s.weapon),
+              s.hp <= 0 ? "DEAD" : s.p.inv && (s.weapon === s.primary || s.weapon === s.secondary) ? null : weaponName(s.weapon),
               s.p.money !== null ? `$${s.p.money}` : null,
             ].filter(Boolean).join(" · ")}
           </div>
@@ -434,7 +434,7 @@ function KillFeed({ r, tick }: { r: Replay; tick: number }) {
     <div className="killfeed">
       {recent.map((k, i) => (
         <div key={i} className="kill">
-          <span style={{ color: sideColor(k.attacker_side) }}>{k.attacker_name ?? "мир"}</span>
+          <span style={{ color: sideColor(k.attacker_side) }}>{k.attacker_name ?? "World"}</span>
           <span className="weapon">
             {k.flashed ? "◐ " : ""}{weaponName(k.weapon)}{k.headshot ? " ⌖" : ""}{k.wallbang ? " ⇥" : ""}{k.thrusmoke ? " ☁" : ""}
           </span>
@@ -476,7 +476,7 @@ function Timeline({ r, tick, onSeek }: { r: Replay; tick: number; onSeek: (t: nu
           key={i}
           className="tl-kill"
           style={{ left: pct(k.tick), background: sideColor(k.attacker_side) }}
-          title={`${k.attacker_name ?? "мир"} → ${k.victim_name} (${weaponName(k.weapon)})`}
+          title={`${k.attacker_name ?? "World"} → ${k.victim_name} (${weaponName(k.weapon)})`}
         />
       ))}
       {r.bomb.filter((b) => b.event === "finish_plant" || b.event === "defuse").map((b, i) => (

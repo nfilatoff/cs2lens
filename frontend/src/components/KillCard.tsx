@@ -23,7 +23,7 @@ export function KillCard({ r, kill, x, y, maxX }: { r: Replay; kill: ReplayKill;
   return (
     <div className="kill-card" style={{ left, top: Math.max(4, y - 20) }}>
       <div className="kc-head">
-        <span style={{ color: sideColor(kill.attacker_side) }}>{kill.attacker_name ?? "мир"}</span>
+        <span style={{ color: sideColor(kill.attacker_side) }}>{kill.attacker_name ?? "World"}</span>
         <span className="kc-weapon">{weaponName(kill.weapon)}</span>
         <span style={{ color: sideColor(kill.victim_side) }}>{kill.victim_name}</span>
       </div>

@@ -20,11 +20,12 @@ const WEAPON_NAMES: Record<string, string> = {
   ump45: "UMP", p90: "P90", bizon: "Bizon", nova: "Nova", xm1014: "XM1014", mag7: "MAG-7", sawedoff: "Sawed-Off",
   m249: "M249", negev: "Negev", glock: "Glock", usp_silencer: "USP-S", hkp2000: "P2000", p250: "P250", fiveseven: "Five-SeveN",
   tec9: "Tec-9", cz75a: "CZ75", deagle: "Deagle", revolver: "R8", elite: "Dualies", taser: "Zeus", c4: "C4",
-  smokegrenade: "смок", flashbang: "флешка", hegrenade: "HE", molotov: "молотов", incendiary: "зажигалка", decoy: "декой",
-  inferno: "огонь", planted_c4: "бомба", world: "мир",
+  // Item names follow the in-game English HUD and kill feed
+  smokegrenade: "Smoke", flashbang: "Flashbang", hegrenade: "HE Grenade", molotov: "Molotov", incendiary: "Incendiary", decoy: "Decoy",
+  inferno: "Fire", planted_c4: "C4", world: "World",
 };
 export const weaponName = (w: string | null | undefined) =>
-  !w ? "" : w.startsWith("knife") || w === "bayonet" ? "нож" : WEAPON_NAMES[w] ?? w;
+  !w ? "" : w.startsWith("knife") || w === "bayonet" ? "Knife" : WEAPON_NAMES[w] ?? w;
 export const nadeOfItem = (item: string) => ITEM_NADE[item];
 
 // ---- data cache: rounds kept in memory, shared by the replay and the clip builder ----
