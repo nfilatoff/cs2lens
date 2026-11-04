@@ -543,7 +543,7 @@ class CS2Bridge:
         return rel
 
     def claim(self) -> int:
-        """Start a new action: a pending delayed command of an older one is dropped."""
+        """Start a new action: an older one still waiting to run is dropped."""
         with self._lock:
             self._generation += 1
             return self._generation
@@ -554,11 +554,10 @@ class CS2Bridge:
         if gen == self._generation:
             self.state = {"phase": phase, "key": key, "params": params, "message": message, "time": time.time()}
 
-    def run(self, load: str, commands: list[str], label: str, reload: bool = False, then: tuple[float, list[str]] | None = None) -> dict:
+    def run(self, load: str, commands: list[str], label: str, reload: bool = False) -> dict:
         """Run ``load`` (``map de_x`` or ``playdemo x``) unless this app already did, then ``commands``:
         right away when there is a link to the game, otherwise after the Steam launch that the
-        browser starts with the returned link. ``then`` = (seconds, commands) sent that
-        long after ``commands``, unless a newer action came in (pausing a demo at the end of a clip)."""
+        browser starts with the returned link."""
         with self._lock:
             self._generation += 1
             gen = self._generation
@@ -566,31 +565,21 @@ class CS2Bridge:
         if not connected and game_running():  # a Steam link does nothing for a game that is already open
             raise NoConsole(NO_CONSOLE)
         if connected:
-            threading.Thread(target=self._send, args=(gen, load, commands, label, reload, then), daemon=True).start()
+            threading.Thread(target=self._send, args=(gen, load, commands, label, reload), daemon=True).start()
             return {"mode": "netcon", "steam_url": None}
         if not self.key_ready():  # the game opens the map or demo, but nothing more can be sent to it
             self._phase(gen, "done", "launched_only", f"Steam is starting CS2 with {load}; commands need the console link", load=load)
             return {"mode": "launch", "steam_url": steam_launch_url(load, self.port)}
         self._phase(gen, "launching", "launching", "Steam is starting CS2: confirm the launch options in the Steam window")
-        threading.Thread(target=self._after_launch, args=(gen, load, commands, label, then), daemon=True).start()
+        threading.Thread(target=self._after_launch, args=(gen, load, commands, label), daemon=True).start()
         return {"mode": "launch", "steam_url": steam_launch_url(load, self.port)}
 
-    def _later(self, gen: int, con, then: tuple[float, list[str]] | None) -> None:
-        if then is None:
-            return
-        end = time.monotonic() + then[0]
-        while time.monotonic() < end:
-            if gen != self._generation:
-                return
-            time.sleep(0.2)
-        con.send(*then[1])
-
-    def _send(self, gen: int, load: str, commands: list[str], label: str, reload: bool, then=None) -> None:
+    def _send(self, gen: int, load: str, commands: list[str], label: str, reload: bool) -> None:
         with self._io:
             if gen == self._generation:  # a newer click replaces this one
-                self._send_now(gen, load, commands, label, reload, then)
+                self._send_now(gen, load, commands, label, reload)
 
-    def _send_now(self, gen: int, load: str, commands: list[str], label: str, reload: bool, then=None) -> None:
+    def _send_now(self, gen: int, load: str, commands: list[str], label: str, reload: bool) -> None:
         try:
             con = self.open_console()
             try:
@@ -603,7 +592,6 @@ class CS2Bridge:
                     self.loaded = load
                 con.send(*commands)
                 self._phase(gen, "done", "done", f"in CS2: {label}", label=label)
-                self._later(gen, con, then)
             finally:
                 con.close()
         except NoConsole as e:
@@ -611,7 +599,7 @@ class CS2Bridge:
         except OSError as e:
             self._phase(gen, "error", "no_answer", f"CS2 does not answer on port {self.port}: {e}", port=self.port, error=str(e))
 
-    def _after_launch(self, gen: int, load: str, commands: list[str], label: str, then=None) -> None:
+    def _after_launch(self, gen: int, load: str, commands: list[str], label: str) -> None:
         end = time.monotonic() + LAUNCH_WAIT
         while time.monotonic() < end and gen == self._generation:
             try:
@@ -629,7 +617,6 @@ class CS2Bridge:
                 self.loaded = load
                 con.send(*commands)
                 self._phase(gen, "done", "done", f"in CS2: {label}", label=label)
-                self._later(gen, con, then)
             except NoConsole as e:
                 self._phase(gen, "error", str(e).removeprefix("cs2_"), str(e))
             except OSError as e:

@@ -42,8 +42,6 @@ from cs2lens.team_stats import team_stats
 STATIC_DIR = Path(__file__).parent / "static"
 UPLOADS = "_uploads"
 CHUNK = 1 << 20
-POV_PREROLL = 1.0  # seconds of the demo played before a highlight window
-POV_SEEK_SLACK = 1.5  # seeking takes a moment, so the pause comes a little after the window
 
 
 def rows(df: pl.DataFrame) -> list[dict]:
@@ -552,11 +550,12 @@ def create_app(out: str | Path = "out") -> FastAPI:
         return _points(d, _stamp(d))
 
     @api.get("/api/matches/{match_id}/kills")
-    def match_kill_clips(match_id: str, steamid: str) -> list[dict]:
+    def match_kill_clips(match_id: str, steamid: str, gap: float | None = None) -> list[dict]:
         """Every kill of a player cut into clip windows (close kills share one)."""
         if not steamid.isdigit():
             raise HTTPException(400, "bad steamid")
-        return kill_clips(lib.match_dir(match_id), steamid)
+        d = lib.match_dir(match_id)
+        return kill_clips(d, steamid, merge_sec=gap) if gap else kill_clips(d, steamid)
 
     # ---- automatic recording: CS2 plays, ffmpeg records ----
     @api.get("/api/recorder")
@@ -571,11 +570,13 @@ def create_app(out: str | Path = "out") -> FastAPI:
     @api.post("/api/recorder/start")
     def recorder_start(
         match_id: str = Body(...), clips: list[dict] = Body(...), capture: str = Body("screen"), fps: int = Body(60),
-        clean: bool = Body(True), close_game: bool = Body(False),
+        clean: bool = Body(True), close_game: bool = Body(False), cut_gap: float | None = Body(None),
     ) -> dict:
         d = lib.match_dir(match_id)
         if capture not in ("screen", "window", "hlae") or fps not in (30, 60) or not 1 <= len(clips) <= 200:
             raise HTTPException(400, "capture: screen | window | hlae, fps: 30 | 60, 1-200 clips")
+        if cut_gap is not None and not 1 <= cut_gap <= 60:
+            raise HTTPException(400, "cut_gap: 1-60 s")
         rounds = pl.read_parquet(d / "rounds.parquet", columns=["round_num", "freeze_end_tick", "is_knife_round"]).filter(~pl.col("is_knife_round"))
         freeze = dict(rounds.select("round_num", "freeze_end_tick").iter_rows())
         rate = float(json.loads((d / "manifest.json").read_text(encoding="utf-8"))["tick_rate"])
@@ -590,6 +591,7 @@ def create_app(out: str | Path = "out") -> FastAPI:
                 round=r, start=start, end=end, tick=max(0, int(freeze[r] + (start - 1.0) * rate)),
                 player=re.sub(r'["\n\r;]|//', " ", names[sid])[:64] if sid in names else None,
                 title=str(c.get("title") or "clip")[:80], kind=str(c.get("kind") or "clip")[:20], steamid=sid, rate=rate,
+                kill_secs=[float(k) for k in c.get("kill_secs") or []], cut_gap=cut_gap,
             ))
         if capture == "hlae":
             exe, game = hlae.find_hlae(), cs2.game_dir()
@@ -791,32 +793,6 @@ def create_app(out: str | Path = "out") -> FastAPI:
         # names may be non-ASCII; only what would break the console line goes
         clean = re.sub(r'["\n\r;]|//', " ", name).strip()[:64]
         return f'spec_player "{clean}"'
-
-    @api.post("/api/cs2/pov")
-    def cs2_pov(
-        match_id: str = Body(...), round: int = Body(...), start: float = Body(...), end: float = Body(...),
-        steamid: str | None = Body(None), speed: float = Body(1.0),
-    ) -> dict:
-        """Play a highlight in CS2 from the player's eyes: seek the demo to the window, watch the player,
-        and pause at the end of the window."""
-        d = lib.match_dir(match_id)
-        if not (end > start and 0.1 <= speed <= 4):
-            raise HTTPException(400, "bad window or speed")
-        rounds = pl.read_parquet(d / "rounds.parquet", columns=["round_num", "freeze_end_tick", "is_knife_round"])
-        r = rounds.filter((pl.col("round_num") == round) & ~pl.col("is_knife_round"))
-        if not r.height:
-            raise HTTPException(404, f"no round {round} in this match")
-        rate = float(json.loads((d / "manifest.json").read_text(encoding="utf-8"))["tick_rate"])
-        tick = max(0, int(r["freeze_end_tick"][0] + (start - POV_PREROLL) * rate))
-        commands = [f"demo_gototick {tick}"]
-        if steamid:
-            players = pl.read_parquet(d / "players.parquet", columns=["steamid", "name"])
-            name = players.filter(pl.col("steamid").cast(pl.String) == str(steamid))["name"]
-            if name.len():
-                commands.append(spec_player(name[0]))
-        commands += [f"demo_timescale {speed:g}", "demo_resume"]
-        pause_after = (end - start + POV_PREROLL) / speed + POV_SEEK_SLACK
-        return cs2.run(f"playdemo {playable(match_id)}", commands, f"POV, round {round}", then=(pause_after, ["demo_pause"]))
 
     @api.get("/api/maps/{map_name}")
     def map_meta(map_name: str) -> dict:

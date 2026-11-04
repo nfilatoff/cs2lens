@@ -25,6 +25,10 @@ MAX_SEC = 60.0
 QUICK_SEC = 3.0  # two kills this close make a quick double
 SNIPERS = {"awp", "ssg08", "g3sg1", "scar20"}
 BASE_SCORE = {"ace": 100, "4k": 75, "3k": 45, "clutch": 30, "double": 15, "special": 12}
+CUT_LEAD = 1.5  # after a cut pause: seconds shown before the next kill
+CUT_TAIL = 1.0  # before a cut pause: seconds shown after the kill
+CUT_LEAD_FIRST = LEAD_SEC  # seconds before the first kill, when the wait before it is cut
+NEIGHBOUR_GAP = 0.2  # seconds between two clips of a round: the game needs a moment between takes
 CUSTOM_FILE = "highlights.json"
 MAX_CUSTOM_SEC = 180.0
 
@@ -127,9 +131,34 @@ def highlights(directory: str | Path) -> list[dict]:
     return sorted(out, key=lambda h: (-h["score"], h["round"]))
 
 
+def keep_ranges(start: float, end: float, kill_secs: list[float], gap: float | None) -> list[tuple[float, float]]:
+    """What stays of a clip window when pauses longer than ``gap`` seconds between kills are cut:
+    (from, to) in seconds from the window's start. One range means nothing is cut."""
+    whole = [(0.0, round(end - start, 3))]
+    kills = sorted(k for k in kill_secs if start <= k <= end)
+    if not gap or not kills:
+        return whole
+    groups = [[kills[0]]]
+    for k in kills[1:]:
+        # what is shown around a cut has to fit into the pause, or the video would repeat itself
+        if k - groups[-1][-1] > max(gap, CUT_LEAD + CUT_TAIL):
+            groups.append([k])
+        else:
+            groups[-1].append(k)
+    # a long wait before the first kill (a clutch shows its beginning) counts as a pause too
+    first = kills[0] - CUT_LEAD_FIRST if kills[0] - start > gap + CUT_LEAD_FIRST else start
+    ranges = []
+    for i, g in enumerate(groups):
+        a = first if i == 0 else g[0] - CUT_LEAD
+        b = end if i == len(groups) - 1 else g[-1] + CUT_TAIL
+        ranges.append((round(a - start, 3), round(b - start, 3)))
+    return ranges
+
+
 def kill_clips(directory: str | Path, steamid: str | int, merge_sec: float = 5.0) -> list[dict]:
     """Every kill of one player as a clip window, in game order; kills closer than ``merge_sec``
-    in one round share a clip (a double is one clip, not two)."""
+    in one round share a clip (a double is one clip, not two). Neighbouring windows of a round
+    never overlap: they meet halfway between the kills."""
     m = load_match(directory)
     rate = m.tick_rate
     kills = (
@@ -161,6 +190,10 @@ def kill_clips(directory: str | Path, steamid: str | int, merge_sec: float = 5.0
             "weapons": [k["weapon"] for k in g],
             "kill_secs": [round(x, 2) for x in sec],
         })
+    for a, b in zip(out, out[1:]):
+        if a["round"] == b["round"] and a["end"] + NEIGHBOUR_GAP > b["start"]:
+            mid = (a["kill_secs"][-1] + b["kill_secs"][0]) / 2
+            a["end"], b["start"] = round(mid - NEIGHBOUR_GAP / 2, 2), round(mid + NEIGHBOUR_GAP / 2, 2)
     return out
 
 

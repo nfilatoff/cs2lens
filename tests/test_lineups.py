@@ -107,23 +107,6 @@ def _wait(cond, sec=8.0):
         time.sleep(0.05)
 
 
-def test_delayed_commands():
-    """A POV playback pauses the demo at the end of the window, unless a newer action came in."""
-    srv, port, received = _fake_cs2()
-    settings = {"netcon_port": port}
-    bridge = CS2Bridge(settings.get, settings.__setitem__)
-    bridge.run("playdemo d", ["demo_gototick 100"], "pov", then=(0.3, ["demo_pause"]))
-    _wait(lambda: "demo_pause" in received)
-    assert received == ["playdemo d", "demo_gototick 100", "demo_pause"]
-    bridge.run("playdemo d", ["demo_gototick 200"], "pov", then=(1.0, ["demo_pause"]))
-    _wait(lambda: "demo_gototick 200" in received)
-    bridge.run("playdemo d", ["demo_gototick 300"], "pov")  # replaces the pending pause
-    _wait(lambda: "demo_gototick 300" in received)
-    time.sleep(1.3)
-    srv.close()
-    assert received[3:] == ["demo_gototick 200", "demo_gototick 300"]
-
-
 def test_stage_demo(tmp_path):
     game = tmp_path / "game" / "csgo"
     (game / "cfg").mkdir(parents=True)

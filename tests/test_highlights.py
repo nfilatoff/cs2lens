@@ -37,36 +37,3 @@ def test_custom_highlights(dust2_mini, tmp_path):
     assert delete_custom(d, h["id"])
     assert not delete_custom(d, h["id"])
     assert load_custom(d) == []
-
-
-def test_pov_in_cs2(dust2_mini, tmp_path):
-    """POV playback seeks the demo to the window, watches the player and pauses after the window."""
-    import json
-
-    from cs2lens.app.server import create_app
-    from tests.test_lineups import _fake_cs2, _wait
-
-    srv, port, received = _fake_cs2()
-    out = tmp_path / "out"
-    shutil.copytree(dust2_mini, out / "m")
-    demo = tmp_path / "demos" / "m.dem"
-    demo.parent.mkdir()
-    demo.write_bytes(b"demo")
-    manifest = json.loads((out / "m" / "manifest.json").read_text(encoding="utf-8"))
-    (out / "m" / "manifest.json").write_text(json.dumps(manifest | {"demo_path": str(demo)}), encoding="utf-8")
-    game = tmp_path / "game" / "csgo"
-    (game / "cfg").mkdir(parents=True)
-    (out / "library.json").write_text(json.dumps({"cs2_dir": str(game), "netcon_port": port}), encoding="utf-8")
-
-    app = create_app(out)
-    pov = next(r.endpoint for r in app.routes if getattr(r, "path", "") == "/api/cs2/pov")
-    best = highlights(out / "m")[0]
-    res = pov(match_id="m", round=best["round"], start=best["start"], end=best["start"] + 0.2, steamid=best["steamid"], speed=1.0)
-    assert res["mode"] == "netcon"
-    _wait(lambda: "demo_pause" in received, 10)
-    srv.close()
-    assert (game / "m.dem").exists()
-    assert received[0] == "playdemo m"
-    assert received[1].startswith("demo_gototick ")
-    assert received[2] == f'spec_player "{best["name"]}"'
-    assert received[3:] == ["demo_timescale 1", "demo_resume", "demo_pause"]

@@ -28,6 +28,7 @@ MAX_ZIP = 200 * 2**20
 CFG_PREFIX = "cs2lens_hlae"
 START_TICK = 128  # the first scheduled command: the demo is playing by then
 BOOT_WAIT = 90.0  # seconds for the game process to appear
+MIN_TAKE_GAP = 2  # ticks between the end of one take and the start of the next
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # what recording needs and what is taken back before quitting: name -> (value, default)
 SESSION_CVARS = {
@@ -140,7 +141,8 @@ def session_batches(clips: list) -> list[list]:
     batches: list[list] = []
     for clip in sorted(clips, key=lambda c: c.tick):
         for batch in batches:
-            if clip.tick > batch[-1].end_tick:
+            # a close neighbour needs no seek: it only has to begin after the previous take has ended
+            if clip.start_tick - batch[-1].end_tick >= MIN_TAKE_GAP:
                 batch.append(clip)
                 break
         else:
@@ -177,9 +179,12 @@ def session_cfgs(clips: list, work: Path, encoder_args: list[str], fps: int, hid
             *([f'spec_player "{c.player}"'] if c.player else []),
         ]
         cfgs[f"{CFG_PREFIX}_{i}_rec"] = ["mirv_streams record start"]
-        following = [f"demo_gototick {clips[i + 1].tick}"] if i + 1 < len(clips) else []
+        # the demo simply plays on to a close neighbour: seeking would pass its setup or rewind
+        following = [f"demo_gototick {clips[i + 1].tick}"] if i + 1 < len(clips) and clips[i + 1].tick > c.end_tick else []
         cfgs[f"{CFG_PREFIX}_{i}_end"] = ["mirv_streams record end", *following]
         settle = c.tick + max(1, (c.start_tick - c.tick) // 4)
+        if i:
+            settle = max(settle, clips[i - 1].end_tick + 1)
         boot += [
             f'mirv_cmd addAtTick {settle} "exec {CFG_PREFIX}_{i}_setup"',
             f'mirv_cmd addAtTick {c.start_tick} "exec {CFG_PREFIX}_{i}_rec"',

@@ -14,6 +14,8 @@ export function RecordPanel({ match, checked, onFinished }: { match: MatchOvervi
   const [player, setPlayer] = useState("");
   const [capture, setCapture] = useState<"screen" | "window" | "hlae">("screen");
   const [installing, setInstalling] = useState(false);
+  const [cut, setCut] = useState(true);
+  const [gap, setGap] = useState(3);
   const [fps, setFps] = useState(60);
   const [clean, setClean] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -59,16 +61,17 @@ export function RecordPanel({ match, checked, onFinished }: { match: MatchOvervi
     setError(null);
     setPreparing(true);
     try {
-      const list = source === "checked" ? checked : await api.killClips(match.id, player);
+      const cutGap = cut && gap >= 1 ? gap : null;
+      const list = source === "checked" ? checked : await api.killClips(match.id, player, cutGap);
       const clips = list.map((h) => ({
-        round: h.round, start: h.start, end: h.end, steamid: h.steamid, kind: h.kind,
+        round: h.round, start: h.start, end: h.end, steamid: h.steamid, kind: h.kind, kill_secs: h.kill_secs,
         title: h.kind === "kills" ? `${h.name} ${t("hl.killsN", { n: h.kills ?? 1 })}` : hlTitle(h, match),
       }));
       if (!clips.length) throw new Error(t("rec.nothing"));
       // HLAE starts its own game: an open one has to close first, and that is the player's call
       const closeGame = capture === "hlae" && !!status?.running;
       if (closeGame && !window.confirm(t("rec.hlae.closeConfirm"))) return;
-      await api.recorderStart(match.id, clips, capture, fps, clean, closeGame);
+      await api.recorderStart(match.id, clips, capture, fps, clean, closeGame, cutGap);
       setStatus(await api.recorder());
     } catch (e) {
       setError((e as Error).message);
@@ -136,6 +139,11 @@ export function RecordPanel({ match, checked, onFinished }: { match: MatchOvervi
         </span>
       </div>
       <label className="small"><input type="checkbox" checked={clean} onChange={(e) => setClean(e.target.checked)} /> {t("rec.clean")}</label>
+      <div className="row small">
+        <label><input type="checkbox" checked={cut} onChange={(e) => setCut(e.target.checked)} /> {t("rec.cut")}</label>
+        <input type="number" min={1} max={60} value={gap} disabled={!cut} style={{ width: 56 }} onChange={(e) => setGap(Number(e.target.value))} /> {t("common.s")}
+      </div>
+      {cut && <div className="muted small">{t(source === "kills" ? "rec.cutKills" : "rec.cutChecked")}</div>}
       {hlaeMode && (
         <div className="link-setup small">
           <div>{t("rec.hlae.about")}</div>

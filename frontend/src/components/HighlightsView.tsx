@@ -1,7 +1,7 @@
 // Highlights of one match: found automatically (aces, multi-kills, clutches, rare kills) or made by
 // hand from a round window, previewed on the radar and downloaded as MP4/GIF, one by one or as a zip.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type CS2Status, type Highlight, type MatchOverview, type Replay } from "../api";
+import { api, type Highlight, type MatchOverview, type Replay } from "../api";
 import { go } from "../App";
 import { canEncodeVideo, download, exportGif, exportMp4, zipFiles } from "../clipExport";
 import { clockOf } from "../clipSummary";
@@ -10,7 +10,7 @@ import {
 } from "../highlightRender";
 import { useMapAssets, type MapAssets } from "../radar";
 import { loadReplay } from "../replayDraw";
-import { t, td } from "../i18n";
+import { t } from "../i18n";
 import { RecordPanel, Recordings } from "./RecordPanel";
 
 const KINDS = ["ace", "4k", "3k", "clutch", "double", "special", "custom"] as const;
@@ -66,8 +66,6 @@ export function HighlightsView({ match, round, at }: { match: MatchOverview; rou
   const [saved, setSaved] = useState<string | null>(null);
   const [recorded, setRecorded] = useState(0); // bumped when a recording session ends
   const [created, setCreated] = useState<string | null>(null); // title of the highlight just saved
-  const [cs2, setCs2] = useState<CS2Status["state"] | null>(null);
-  const [povSince, setPovSince] = useState<number | null>(null);
 
   useEffect(() => {
     api.highlights(match.id).then(setData).catch((e: Error) => setError(e.message));
@@ -83,6 +81,19 @@ export function HighlightsView({ match, round, at }: { match: MatchOverview; rou
   const list = all.filter((h) =>
     (!kind || h.kind === kind) && (!team || teamOf(h) === team) && (!player || h.steamid === player));
   const selected = all.find((h) => h.id === selectedId) ?? list[0] ?? null;
+
+  // the form starts from the selected highlight, so editing means adjusting what is on screen;
+  // a moment opened from the replay keeps its own values until another highlight is picked
+  const fromReplay = round !== undefined && selectedId === null;
+  useEffect(() => {
+    if (!selected || fromReplay) return;
+    setForm({
+      round: selected.round, from: Math.floor(selected.start * 10) / 10, to: Math.ceil(selected.end * 10) / 10,
+      steamid: selected.steamid ?? "", title: selected.title ?? "",
+    });
+    setCreated(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id]);
 
   // ---- preview ----
   const [replay, setReplay] = useState<Replay | null>(null);
@@ -156,34 +167,6 @@ export function HighlightsView({ match, round, at }: { match: MatchOverview; rou
     setT(tRef.current);
   };
 
-  // ---- POV in CS2: the game plays the demo from the player's eyes ----
-  const pov = async (h: Highlight) => {
-    setError(null);
-    try {
-      const r = await api.cs2Pov(match.id, { round: h.round, start: h.start, end: h.end, steamid: h.steamid }, opts.speed);
-      if (r.mode === "launch" && r.steam_url) window.location.href = r.steam_url; // Steam asks to confirm the launch options
-      setPovSince(Date.now() / 1000);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-  // the game's progress while a POV is on its way (launching, loading, sent)
-  useEffect(() => {
-    if (povSince === null) return;
-    let alive = true;
-    const poll = () => api.cs2().then((s) => {
-      if (!alive || s.state.time < povSince - 1) return;
-      setCs2(s.state);
-      if (s.state.phase === "done" || s.state.phase === "error") setPovSince(null);
-    }).catch(() => {});
-    poll();
-    const timer = setInterval(poll, 1500);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, [povSince]);
-
   // ---- create / delete ----
   const create = async () => {
     setError(null);
@@ -196,7 +179,7 @@ export function HighlightsView({ match, round, at }: { match: MatchOverview; rou
       setTeam("");
       setPlayer("");
       setSelectedId(h.id);
-      setCreated(hlTitle(h, match));
+      window.setTimeout(() => setCreated(hlTitle(h, match))); // after the form has followed the new selection
       setForm((f) => ({ ...f, title: "" }));
     } catch (e) {
       setError((e as Error).message);
@@ -346,17 +329,6 @@ export function HighlightsView({ match, round, at }: { match: MatchOverview; rou
           )}
         </div>
         {saved && <div className="small ok-text">{saved}</div>}
-        <div className="row">
-          <button disabled={!selected?.steamid} title={selected?.steamid ? t("hl.povTitle") : t("hl.povNoPlayer")} onClick={() => selected && pov(selected)}>
-            {t("hl.pov")}
-          </button>
-          {cs2 && (
-            <span className={`small ${cs2.phase === "error" ? "error" : cs2.phase === "done" ? "ok-text" : "warn-text"}`}>
-              {td(`cs2.msg.${cs2.key}`, cs2.message, cs2.params)}
-            </span>
-          )}
-        </div>
-        <div className="muted small">{t("hl.povHint")}</div>
 
         <RecordPanel match={match} checked={all.filter((h) => checked.has(h.id))} onFinished={() => setRecorded((n) => n + 1)} />
 
@@ -367,8 +339,9 @@ export function HighlightsView({ match, round, at }: { match: MatchOverview; rou
             <select value={form.round} onChange={(e) => setForm({ ...form, round: Number(e.target.value) })}>
               {rounds.map((r) => <option key={r} value={r}>{t("common.round", { n: r })}</option>)}
             </select>
-            {t("common.from")} <input type="number" value={form.from} min={-15} max={175} onChange={(e) => setForm({ ...form, from: Number(e.target.value) })} />
-            {t("common.to")} <input type="number" value={form.to} min={-14} max={180} onChange={(e) => setForm({ ...form, to: Number(e.target.value) })} /> {t("common.s")}
+            {t("common.from")} <input type="number" step={0.5} value={form.from} min={-15} max={175} onChange={(e) => setForm({ ...form, from: Number(e.target.value) })} />
+            {t("common.to")} <input type="number" step={0.5} value={form.to} min={-14} max={180} onChange={(e) => setForm({ ...form, to: Number(e.target.value) })} /> {t("common.s")}
+            <span className="muted">{t("hl.formClock", { from: clockOf(form.from), to: clockOf(form.to), len: Math.max(0, Math.round(form.to - form.from)) })}</span>
           </div>
           <div className="row small">
             {t("hl.focus")}

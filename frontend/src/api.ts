@@ -401,8 +401,6 @@ export const api = {
     request<{ text: string; file: string; exec: string; path: string | null }>("/api/cs2/list", json({ map, name, lineups, install })),
   cs2RunList: (map: string, name: string) =>
     request<{ mode: "netcon" | "launch"; steam_url: string | null }>("/api/cs2/run-list", json({ map, name })),
-  cs2Pov: (match_id: string, h: { round: number; start: number; end: number; steamid: string | null }, speed: number) =>
-    request<{ mode: "netcon" | "launch"; steam_url: string | null }>("/api/cs2/pov", json({ match_id, ...h, speed })),
   cs2Demo: (match_id: string, tick: number, player: string) =>
     request<{ mode: "netcon" | "launch"; steam_url: string | null }>("/api/cs2/demo", json({ match_id, tick, player })),
   highlights: (id: string) => request<{ auto: Highlight[]; custom: Highlight[] }>(`${m(id)}/highlights`),
@@ -410,11 +408,12 @@ export const api = {
     request<Highlight>(`${m(id)}/highlights`, json(h)),
   deleteHighlight: (id: string, hid: string) => request<{ deleted: string }>(`${m(id)}/highlights/${encodeURIComponent(hid)}`, { method: "DELETE" }),
   system: () => request<{ locale: string | null }>("/api/system"),
-  killClips: (id: string, steamid: string) => request<Highlight[]>(`${m(id)}/kills?steamid=${encodeURIComponent(steamid)}`),
+  killClips: (id: string, steamid: string, gap: number | null) =>
+    request<Highlight[]>(`${m(id)}/kills?steamid=${encodeURIComponent(steamid)}${gap ? `&gap=${gap}` : ""}`),
   recorder: () => request<RecorderStatus>("/api/recorder"),
-  recorderStart: (match_id: string, clips: { round: number; start: number; end: number; steamid: string | null; title: string; kind: string }[],
-    capture: "screen" | "window" | "hlae", fps: number, clean: boolean, close_game = false) =>
-    request<{ steam_url: string | null }>("/api/recorder/start", json({ match_id, clips, capture, fps, clean, close_game })),
+  recorderStart: (match_id: string, clips: { round: number; start: number; end: number; steamid: string | null; title: string; kind: string; kill_secs?: number[] }[],
+    capture: "screen" | "window" | "hlae", fps: number, clean: boolean, close_game = false, cut_gap: number | null = null) =>
+    request<{ steam_url: string | null }>("/api/recorder/start", json({ match_id, clips, capture, fps, clean, close_game, cut_gap })),
   hlaeInstall: () => request<{ version: string; path: string; sha256: string }>("/api/hlae/install", { method: "POST" }),
   recorderCancel: () => request<RecorderStatus["state"]>("/api/recorder/cancel", { method: "POST" }),
   recordings: (id: string) => request<Recording[]>(`${m(id)}/recordings`),

@@ -129,7 +129,6 @@ main { width: 100%; max-width: 1680px; margin: 0 auto; }
 .error { color: var(--err); margin: 8px 0; }
 .warn { color: var(--warn); margin: 6px 0; padding: 8px 12px; background: rgba(255, 176, 32, 0.08); border-left: 3px solid var(--warn); border-radius: 6px; }
 .ok-text { color: var(--ok); }
-.warn-text { color: var(--warn); }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 1fr)); gap: 0 20px; }
 .grid2 > * { min-width: 0; }

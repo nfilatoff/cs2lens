@@ -16,11 +16,12 @@ import shutil
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from cs2lens.app import hlae
 from cs2lens.app.cs2 import INGAME, LOAD_WAIT, NO_CONSOLE, CS2Bridge, NoConsole, game_running, user_cvars
+from cs2lens.highlights import keep_ranges
 
 PREROLL = 1.0  # seconds before the clip window that are played (and cut) so the view settles
 SEEK_WAIT = 10.0  # seconds for a demo seek (measured: 5 for 20 minutes of a demo)
@@ -109,6 +110,11 @@ class Clip:
     kind: str
     steamid: str | None = None
     rate: float = 64.0  # ticks per second
+    kill_secs: list[float] = field(default_factory=list)  # seconds after the freeze end
+    cut_gap: float | None = None  # pauses between kills longer than this are cut out
+
+    def ranges(self) -> list[tuple[float, float]]:
+        return keep_ranges(self.start, self.end, self.kill_secs, self.cut_gap)
 
     @property
     def start_tick(self) -> int:
@@ -136,6 +142,31 @@ def save_index(folder: Path, items: list[dict]) -> None:
     tmp = folder / (INDEX + ".tmp")
     tmp.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(folder / INDEX)
+
+
+def cut_video(ffmpeg: str, encoder: str, path: Path, ranges: list[tuple[float, float]]) -> None:
+    """Keep only ``ranges`` of the video, joined into one. Cutting anywhere needs a new encode;
+    the sound, if any, follows the picture exactly."""
+    if len(ranges) < 2:
+        return
+    probe = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True, errors="ignore", creationflags=NO_WINDOW)
+    sound = "Audio:" in probe.stderr
+    parts, labels = [], ""
+    for i, (a, b) in enumerate(ranges):
+        parts.append(f"[0:v]trim={a}:{b},setpts=PTS-STARTPTS[v{i}]")
+        labels += f"[v{i}]"
+        if sound:
+            parts.append(f"[0:a]atrim={a}:{b},asetpts=PTS-STARTPTS[a{i}]")
+            labels += f"[a{i}]"
+    parts.append(f"{labels}concat=n={len(ranges)}:v=1:a={int(sound)}" + ("[v][a]" if sound else "[v]"))
+    tmp = path.with_name(f"_cut_{path.name}")
+    subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path), "-filter_complex", ";".join(parts), "-map", "[v]",
+         *(["-map", "[a]", "-c:a", "aac", "-b:a", "192k"] if sound else []),
+         "-c:v", encoder, *QUALITY[encoder], "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(tmp)],
+        check=True, creationflags=NO_WINDOW, timeout=600,
+    )
+    tmp.replace(path)
 
 
 class Cancelled(Exception):
@@ -242,6 +273,7 @@ class Recorder:
                         out = self._new_path(folder, clip)
                         if not hlae.mux_take(ffmpeg, work / f"clip{k}", out):
                             raise RuntimeError("cs2_hlae_no_video")
+                        cut_video(ffmpeg, encoder, out, clip.ranges())
                         self.state["files"].append(self._index(folder, clip, out))
                     done += len(batch)
             self.state.update(status="done", phase="done", finished=time.time())
@@ -267,7 +299,7 @@ class Recorder:
         items = load_index(folder)
         items.append({
             "file": out.name, "title": clip.title, "kind": clip.kind, "round": clip.round, "steamid": clip.steamid,
-            "seconds": round(clip.end - clip.start, 1), "size": out.stat().st_size, "created": int(time.time()),
+            "seconds": round(sum(b - a for a, b in clip.ranges()), 1), "size": out.stat().st_size, "created": int(time.time()),
         })
         save_index(folder, items)
         return out.name
@@ -286,7 +318,7 @@ class Recorder:
         con = None
         try:
             with self.bridge._io:
-                self.bridge.claim()  # cancels a pending POV pause
+                self.bridge.claim()  # an older action still waiting does not run
                 con = self.bridge.open_console()
                 # always load: a fresh demo has a known state (the demo panel open, whatever came before)
                 load = f"playdemo {playdemo}"
@@ -385,4 +417,5 @@ class Recorder:
             check=True, creationflags=NO_WINDOW, timeout=120,
         )
         raw.unlink(missing_ok=True)
+        cut_video(ffmpeg, encoder, out, clip.ranges())
         return self._index(folder, clip, out)
