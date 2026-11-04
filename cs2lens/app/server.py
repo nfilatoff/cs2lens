@@ -8,8 +8,11 @@ per extract directory and invalidated when its ``manifest.json`` changes.
 from __future__ import annotations
 
 import json
+import locale
 import re
+import sys
 import shutil
+import time
 import warnings
 from functools import lru_cache
 from pathlib import Path
@@ -23,10 +26,13 @@ from fastapi.staticfiles import StaticFiles
 
 from cs2lens.aggregate import aggregate
 from cs2lens.app.archives import is_archive, unpack
-from cs2lens.app.cs2 import CS2Bridge
+from cs2lens.app.cs2 import BIND_COMMAND, CS2Bridge, NoConsole, game_running, steam_account
+from cs2lens.app import hlae
+from cs2lens.app.recorder import Clip, Recorder, find_ffmpeg, load_index, pick_encoder, save_index
 from cs2lens.app.jobs import JobQueue
 from cs2lens.context import load_match, with_round
 from cs2lens.extract import add_replay, extract
+from cs2lens.highlights import add_custom, delete_custom, highlights, kill_clips, load_custom
 from cs2lens.lineups import MAP_RE, PRACTICE, cfg_name, lineup_cfg, lineup_commands, list_cfg, safe_text, throws
 from cs2lens.maps import load_map_config
 from cs2lens.replay import round_payload
@@ -36,6 +42,8 @@ from cs2lens.team_stats import team_stats
 STATIC_DIR = Path(__file__).parent / "static"
 UPLOADS = "_uploads"
 CHUNK = 1 << 20
+POV_PREROLL = 1.0  # seconds of the demo played before a highlight window
+POV_SEEK_SLACK = 1.5  # seeking takes a moment, so the pause comes a little after the window
 
 
 def rows(df: pl.DataFrame) -> list[dict]:
@@ -87,13 +95,23 @@ class Library:
     def matches(self) -> list[Path]:
         return sorted(p.parent for p in self.out.glob("*/manifest.json"))
 
-    def demos(self) -> list[Path]:
+    def all_demos(self) -> list[Path]:
         found = []
         for folder in [*self.folders(), str(self.out / UPLOADS)]:
             p = Path(folder)
             if p.is_dir():
                 found += sorted(p.glob("*.dem"))
         return found
+
+    def demos(self) -> list[Path]:
+        """Each demo once: an upload saved into a library folder (game/csgo) is in both places."""
+        seen, out = set(), []
+        for p in self.all_demos():
+            key = (p.stem, p.stat().st_size)
+            if key not in seen:
+                seen.add(key)
+                out.append(p)
+        return out
 
     def demo_for(self, d: Path) -> Path | None:
         """The .dem an extract came from: the manifest path, else a same-named demo in a folder."""
@@ -104,7 +122,7 @@ class Library:
 
     def owns_demo(self, path: Path) -> bool:
         """Only .dem files in the library folders (or uploads) may be deleted through the API."""
-        return path.suffix.lower() == ".dem" and path.is_file() and any(path.resolve() == p.resolve() for p in self.demos())
+        return path.suffix.lower() == ".dem" and path.is_file() and any(path.resolve() == p.resolve() for p in self.all_demos())
 
 
 @lru_cache(maxsize=1024)
@@ -179,6 +197,25 @@ def _tactics(d: Path, _stamp: float) -> dict:
             result = {"tables": None, "error": str(e)}
     result["warnings"] = [str(w.message) for w in caught]
     return result
+
+
+@lru_cache(maxsize=64)
+def _highlights(d: Path, _stamp: float) -> list[dict]:
+    return highlights(d)
+
+
+def system_locale() -> str | None:
+    """The OS user interface language, e.g. ``ru_RU`` (the browser may be set to another one)."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+            return locale.windows_locale.get(lang_id)
+        except (AttributeError, OSError):
+            pass
+    loc = locale.getlocale()[0]
+    return loc or None
 
 
 def _sec(df: pl.DataFrame, rate: float) -> pl.DataFrame:
@@ -335,12 +372,32 @@ def create_app(out: str | Path = "out") -> FastAPI:
     lib = Library(Path(out))
     jobs = JobQueue()
     cs2 = CS2Bridge(lib.setting, lib.set_setting)
+    recorder = Recorder(cs2)
     api = FastAPI(title="cs2lens")
+
+    @api.exception_handler(NoConsole)
+    def no_console(_request: Request, e: NoConsole) -> JSONResponse:
+        return JSONResponse({"detail": str(e)}, status_code=409)
 
     def queue_extract(demo: Path) -> dict:
         target = lib.out / demo.stem
-        job = jobs.submit("extract", str(demo), demo.stem, lambda progress: extract(demo, target, progress=progress))
+
+        def work(progress) -> None:
+            extract(demo, target, progress=progress)
+            try:  # CS2 only opens demos from its own folder
+                cs2.stage_demo(demo)
+            except (ValueError, OSError):  # no game folder or no space: the analysis is still fine
+                pass
+
+        job = jobs.submit("extract", str(demo), demo.stem, work)
         return {"job": job.id}
+
+    def remove_demo(p: Path) -> None:
+        """Delete a demo with its copies: in the library folders, the uploads and game/csgo."""
+        size = p.stat().st_size
+        saved = cs2.saved_copy(p)
+        for q in [q for q in lib.all_demos() if q.stem == p.stem and q.stat().st_size == size] + ([saved] if saved else []) + [p]:
+            q.unlink(missing_ok=True)
 
     def queue_new(demo: Path) -> int | None:
         """Extract a demo unless it already has an extract."""
@@ -353,6 +410,10 @@ def create_app(out: str | Path = "out") -> FastAPI:
             archive.unlink(missing_ok=True)
         for demo in demos:
             queue_new(demo)
+
+    @api.get("/api/system")
+    def system() -> dict:
+        return {"locale": system_locale()}
 
     @api.get("/api/library")
     def library() -> dict:
@@ -444,11 +505,11 @@ def create_app(out: str | Path = "out") -> FastAPI:
             raise HTTPException(409, "the match is being processed; wait for the job to finish")
         source = lib.demo_for(d) if demo else None
         shutil.rmtree(d)
-        for cached in (_overview, _tactics, _points):
+        for cached in (_overview, _tactics, _points, _highlights):
             cached.cache_clear()
         deleted_demo = None
         if source is not None and lib.owns_demo(source):
-            source.unlink()
+            remove_demo(source)
             deleted_demo = str(source)
         return {"deleted": match_id, "demo": deleted_demo}
 
@@ -459,7 +520,7 @@ def create_app(out: str | Path = "out") -> FastAPI:
             raise HTTPException(404, f"not a demo of the library: {path}")
         if jobs.active_for(str(p)):
             raise HTTPException(409, "the demo is being processed; wait for the job to finish")
-        p.unlink()
+        remove_demo(p)
         return {"deleted": str(p)}
 
     @api.get("/api/jobs")
@@ -490,6 +551,136 @@ def create_app(out: str | Path = "out") -> FastAPI:
         d = lib.match_dir(match_id)
         return _points(d, _stamp(d))
 
+    @api.get("/api/matches/{match_id}/kills")
+    def match_kill_clips(match_id: str, steamid: str) -> list[dict]:
+        """Every kill of a player cut into clip windows (close kills share one)."""
+        if not steamid.isdigit():
+            raise HTTPException(400, "bad steamid")
+        return kill_clips(lib.match_dir(match_id), steamid)
+
+    # ---- automatic recording: CS2 plays, ffmpeg records ----
+    @api.get("/api/recorder")
+    def recorder_status() -> dict:
+        ffmpeg = find_ffmpeg()
+        return {
+            "state": recorder.state, "ffmpeg": ffmpeg, "encoder": pick_encoder(ffmpeg) if ffmpeg else None,
+            "connected": cs2.connected(), "running": game_running(), "bind_command": BIND_COMMAND, "me": steam_account(),
+            "hlae": str(hlae.find_hlae()) if hlae.find_hlae() else None,
+        }
+
+    @api.post("/api/recorder/start")
+    def recorder_start(
+        match_id: str = Body(...), clips: list[dict] = Body(...), capture: str = Body("screen"), fps: int = Body(60),
+        clean: bool = Body(True), close_game: bool = Body(False),
+    ) -> dict:
+        d = lib.match_dir(match_id)
+        if capture not in ("screen", "window", "hlae") or fps not in (30, 60) or not 1 <= len(clips) <= 200:
+            raise HTTPException(400, "capture: screen | window | hlae, fps: 30 | 60, 1-200 clips")
+        rounds = pl.read_parquet(d / "rounds.parquet", columns=["round_num", "freeze_end_tick", "is_knife_round"]).filter(~pl.col("is_knife_round"))
+        freeze = dict(rounds.select("round_num", "freeze_end_tick").iter_rows())
+        rate = float(json.loads((d / "manifest.json").read_text(encoding="utf-8"))["tick_rate"])
+        names = {str(k): v for k, v in pl.read_parquet(d / "players.parquet", columns=["steamid", "name"]).iter_rows()}
+        todo = []
+        for c in clips:
+            r, start, end = int(c.get("round", -1)), float(c.get("start", 0)), float(c.get("end", 0))
+            if r not in freeze or not 0 < end - start <= 180:
+                raise HTTPException(400, f"bad clip: round {r}, {start}-{end} s")
+            sid = str(c["steamid"]) if c.get("steamid") else None
+            todo.append(Clip(
+                round=r, start=start, end=end, tick=max(0, int(freeze[r] + (start - 1.0) * rate)),
+                player=re.sub(r'["\n\r;]|//', " ", names[sid])[:64] if sid in names else None,
+                title=str(c.get("title") or "clip")[:80], kind=str(c.get("kind") or "clip")[:20], steamid=sid, rate=rate,
+            ))
+        if capture == "hlae":
+            exe, game = hlae.find_hlae(), cs2.game_dir()
+            if exe is None:
+                raise HTTPException(409, "cs2_hlae_missing")
+            if game is None:
+                raise HTTPException(409, "cs2_not_front")
+            if not hlae.steam_running():
+                raise HTTPException(409, "cs2_no_steam")
+            if recorder.running():
+                raise HTTPException(409, "a recording is already running")
+            if game_running():
+                if not close_game:  # the player's own game: closing it is their call
+                    raise HTTPException(409, "cs2_running")
+                hlae.close_game()
+                time.sleep(2)
+            try:
+                return recorder.start_hlae(match_id, d / "recordings", playable(match_id), game, exe, todo, fps, clean)
+            except RuntimeError as e:
+                raise HTTPException(409, str(e)) from e
+        try:
+            return recorder.start(match_id, d / "recordings", playable(match_id), todo, capture, fps, clean)
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from e
+
+    @api.post("/api/cs2/console-test")
+    def cs2_console_test() -> dict:
+        """Press the bound key in the game and check that it answers; remembers the link when it does."""
+        return {"mode": cs2.test_console()}
+
+    @api.post("/api/hlae/install")
+    def hlae_install() -> dict:
+        """Download HLAE from its official GitHub releases (checked against the release's SHA-256)."""
+        try:
+            return hlae.install()
+        except (OSError, ValueError) as e:
+            raise HTTPException(502, f"HLAE was not installed: {e}") from e
+
+    @api.post("/api/recorder/cancel")
+    def recorder_cancel() -> dict:
+        recorder.cancel()
+        return recorder.state
+
+    @api.get("/api/matches/{match_id}/recordings")
+    def recordings(match_id: str) -> list[dict]:
+        folder = lib.match_dir(match_id) / "recordings"
+        return [r for r in load_index(folder) if (folder / r["file"]).exists()]
+
+    def recording_file(match_id: str, name: str) -> Path:
+        folder = lib.match_dir(match_id) / "recordings"
+        p = folder / name
+        if p.parent.resolve() != folder.resolve() or p.suffix != ".mp4" or not p.is_file():
+            raise HTTPException(404, f"no recording {name}")
+        return p
+
+    @api.get("/api/matches/{match_id}/recordings/{name}")
+    def recording(match_id: str, name: str, download: bool = False) -> FileResponse:
+        p = recording_file(match_id, name)
+        return FileResponse(p, media_type="video/mp4", filename=p.name if download else None)
+
+    @api.delete("/api/matches/{match_id}/recordings/{name}")
+    def delete_recording(match_id: str, name: str) -> dict:
+        p = recording_file(match_id, name)
+        if recorder.running() and recorder.state.get("match_id") == match_id:
+            raise HTTPException(409, "a recording of this match is running")
+        p.unlink()
+        save_index(p.parent, [r for r in load_index(p.parent) if r["file"] != name])
+        return {"deleted": name}
+
+    @api.get("/api/matches/{match_id}/highlights")
+    def match_highlights(match_id: str) -> dict:
+        d = lib.match_dir(match_id)
+        return {"auto": _highlights(d, _stamp(d)), "custom": load_custom(d)}
+
+    @api.post("/api/matches/{match_id}/highlights")
+    def create_highlight(
+        match_id: str, round: int = Body(...), start: float = Body(...), end: float = Body(...),
+        title: str = Body(""), steamid: str | None = Body(None),
+    ) -> dict:
+        d = lib.match_dir(match_id)
+        try:
+            return add_custom(d, round, start, end, title, steamid)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @api.delete("/api/matches/{match_id}/highlights/{highlight_id}")
+    def remove_highlight(match_id: str, highlight_id: str) -> dict:
+        if not delete_custom(lib.match_dir(match_id), highlight_id):
+            raise HTTPException(404, f"no custom highlight {highlight_id}")
+        return {"deleted": highlight_id}
+
     @api.get("/api/matches/{match_id}/rounds/{round_num}/replay")
     def replay(match_id: str, round_num: int) -> Response:
         d = lib.match_dir(match_id)
@@ -511,13 +702,8 @@ def create_app(out: str | Path = "out") -> FastAPI:
     def match_throws(match_id: str) -> dict:
         d = lib.match_dir(match_id)
         manifest = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
-        demo, game = lib.demo_for(d), cs2.game_dir()
-        playdemo = None
-        if demo and game:
-            try:  # playdemo takes a path relative to game/csgo
-                playdemo = demo.resolve().relative_to(game.resolve()).with_suffix("").as_posix()
-            except ValueError:
-                pass
+        demo = lib.demo_for(d)
+        playdemo = cs2.demo_path(demo) if demo else None  # a demo outside the game folder is staged on use
         return {"map": manifest["header"].get("map_name"), "tick_rate": manifest["tick_rate"],
                 "playdemo": playdemo, "throws": _throws(d, _stamp(d))}
 
@@ -554,7 +740,7 @@ def create_app(out: str | Path = "out") -> FastAPI:
         map_name, lu = check_map(map), check_lineup(lineup)
         path = cs2.write_cfg("cs2lens_lineup", lineup_cfg(map_name, lu, lu["label"]))
         commands = [c for c in PRACTICE if not c.startswith("//")] + lineup_commands(lu) + [f"echo cs2lens: {lu['label']}"]
-        return cs2.run(f"map {map_name}", commands, lu["label"] or "лайнап", reload) | {"cfg": str(path) if path else None}
+        return cs2.run(f"map {map_name}", commands, lu["label"] or "lineup", reload) | {"cfg": str(path) if path else None}
 
     @api.post("/api/cs2/list")
     def cs2_list(
@@ -586,13 +772,51 @@ def create_app(out: str | Path = "out") -> FastAPI:
     @api.post("/api/cs2/demo")
     def cs2_demo(match_id: str = Body(...), tick: int = Body(...), player: str = Body("")) -> dict:
         """Open the match demo in CS2 a few seconds before ``tick``, watching ``player``."""
-        info = match_throws(match_id)
-        if not info["playdemo"]:
-            raise HTTPException(404, "the demo is not inside the CS2 game folder, so CS2 cannot open it")
         commands = [f"demo_gototick {max(0, int(tick))}"]
         if player:
-            commands.append(f'spec_player "{safe_text(player, 40)}"')
-        return cs2.run(f"playdemo {info['playdemo']}", commands, f"демка, тик {tick}")
+            commands.append(spec_player(player))
+        return cs2.run(f"playdemo {playable(match_id)}", commands, f"demo, tick {tick}")
+
+    def playable(match_id: str) -> str:
+        """The ``playdemo`` argument of a match's demo, linking or copying it into the game folder if needed."""
+        demo = lib.demo_for(lib.match_dir(match_id))
+        if demo is None:
+            raise HTTPException(404, "the source .dem was not found; add its folder to the library")
+        try:
+            return cs2.stage_demo(demo)
+        except (ValueError, OSError) as e:
+            raise HTTPException(404, str(e)) from e
+
+    def spec_player(name: str) -> str:
+        # names may be non-ASCII; only what would break the console line goes
+        clean = re.sub(r'["\n\r;]|//', " ", name).strip()[:64]
+        return f'spec_player "{clean}"'
+
+    @api.post("/api/cs2/pov")
+    def cs2_pov(
+        match_id: str = Body(...), round: int = Body(...), start: float = Body(...), end: float = Body(...),
+        steamid: str | None = Body(None), speed: float = Body(1.0),
+    ) -> dict:
+        """Play a highlight in CS2 from the player's eyes: seek the demo to the window, watch the player,
+        and pause at the end of the window."""
+        d = lib.match_dir(match_id)
+        if not (end > start and 0.1 <= speed <= 4):
+            raise HTTPException(400, "bad window or speed")
+        rounds = pl.read_parquet(d / "rounds.parquet", columns=["round_num", "freeze_end_tick", "is_knife_round"])
+        r = rounds.filter((pl.col("round_num") == round) & ~pl.col("is_knife_round"))
+        if not r.height:
+            raise HTTPException(404, f"no round {round} in this match")
+        rate = float(json.loads((d / "manifest.json").read_text(encoding="utf-8"))["tick_rate"])
+        tick = max(0, int(r["freeze_end_tick"][0] + (start - POV_PREROLL) * rate))
+        commands = [f"demo_gototick {tick}"]
+        if steamid:
+            players = pl.read_parquet(d / "players.parquet", columns=["steamid", "name"])
+            name = players.filter(pl.col("steamid").cast(pl.String) == str(steamid))["name"]
+            if name.len():
+                commands.append(spec_player(name[0]))
+        commands += [f"demo_timescale {speed:g}", "demo_resume"]
+        pause_after = (end - start + POV_PREROLL) / speed + POV_SEEK_SLACK
+        return cs2.run(f"playdemo {playable(match_id)}", commands, f"POV, round {round}", then=(pause_after, ["demo_pause"]))
 
     @api.get("/api/maps/{map_name}")
     def map_meta(map_name: str) -> dict:

@@ -33,7 +33,7 @@ JUMP_RISE = 8.0  # feet this far above the lowest point around the release: jump
 WINDOW = 24  # ticks around the release used for the technique
 RUN_SPEED = 170.0  # units/s
 WALK_SPEED = 40.0
-TECHNIQUES = {"stand": "стоя", "walk": "шагом", "run": "в беге", "jump": "прыжок", "run_jump": "бег + прыжок"}
+TECHNIQUES = {"stand": "stand", "walk": "walk", "run": "run", "jump": "jumpthrow", "run_jump": "run jumpthrow"}
 
 
 def throws(directory: str | Path) -> pl.DataFrame:

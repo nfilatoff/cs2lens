@@ -2,41 +2,42 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type MatchOverview, type Movement, type Points, type Row } from "../api";
 import { GRID, PALETTES, add, drawHeat, newGrid, type HeatOptions } from "../heat";
 import { drawRadar, levelLabel, levelOf, sideShort, useMapAssets, worldToPx, type MapAssets } from "../radar";
+import { t, td, type Key } from "../i18n";
 
 const NADE_COLORS: Record<string, string> = { smoke: "#d9d9d9", flash: "#fff35c", he: "#ff5c5c", molotov: "#ff9f1c" };
-const NADE_LABELS: Record<string, string> = { smoke: "смоки", flash: "флешки", he: "HE", molotov: "молотовы" };
 
 type Source = "movement" | "kills" | "shots" | "damages" | "blinds" | "plants" | "utility";
 
+// label and note of a mode are mode.<key> and mode.<key>.note in the locales
 interface ModeDef {
   key: string;
-  label: string;
   source: Source;
   role?: "attacker" | "victim"; // whose position, team, side and name the row stands for
   only?: (r: Row) => boolean;
   weight?: (r: Row) => number;
-  note: string;
 }
 
 const MODES: ModeDef[] = [
-  { key: "movement", label: "передвижение", source: "movement", note: "Где живые игроки проводят время: каждая позиция раз в 4 тика (16 в секунду)." },
-  { key: "deaths", label: "где умирали", source: "kills", role: "victim", note: "Места гибели." },
-  { key: "kills", label: "откуда убивали", source: "kills", role: "attacker", note: "Позиции убийц в момент убийства." },
-  { key: "open_kills", label: "первые фраги", source: "kills", role: "attacker", only: (r) => !!r.opening, note: "Откуда сделан первый фраг раунда (опенинг)." },
-  { key: "open_deaths", label: "первые смерти", source: "kills", role: "victim", only: (r) => !!r.opening, note: "Где погиб первый игрок раунда." },
-  { key: "shots", label: "откуда стреляли", source: "shots", note: "Позиции стрелявших: каждая пуля — точка (без ножа и гранат)." },
-  { key: "dmg_taken", label: "где получали урон", source: "damages", role: "victim", weight: (r) => Number(r.dmg) || 0, note: "Позиции раненых, вес — нанесённый урон." },
-  { key: "dmg_dealt", label: "откуда наносили урон", source: "damages", role: "attacker", weight: (r) => Number(r.dmg) || 0, note: "Позиции атакующих, вес — урон." },
-  { key: "blinded", label: "где ослепляли", source: "blinds", role: "victim", weight: (r) => Number(r.duration) || 0, note: "Позиции ослеплённых соперником, вес — длительность ослепления." },
-  { key: "flashers", label: "откуда флешили", source: "blinds", role: "attacker", weight: (r) => Number(r.duration) || 0, note: "Позиции бросавших флешку, ослепившую соперника." },
-  { key: "plants", label: "планты", source: "plants", note: "Места закладки бомбы." },
-  { key: "utility", label: "гранаты", source: "utility", note: "Точка — место, где граната сработала (смок, флешка, HE) или загорелся молотов." },
+  { key: "movement", source: "movement" },
+  { key: "deaths", source: "kills", role: "victim" },
+  { key: "kills", source: "kills", role: "attacker" },
+  { key: "open_kills", source: "kills", role: "attacker", only: (r) => !!r.opening },
+  { key: "open_deaths", source: "kills", role: "victim", only: (r) => !!r.opening },
+  { key: "shots", source: "shots" },
+  { key: "dmg_taken", source: "damages", role: "victim", weight: (r) => Number(r.dmg) || 0 },
+  { key: "dmg_dealt", source: "damages", role: "attacker", weight: (r) => Number(r.dmg) || 0 },
+  { key: "blinded", source: "blinds", role: "victim", weight: (r) => Number(r.duration) || 0 },
+  { key: "flashers", source: "blinds", role: "attacker", weight: (r) => Number(r.duration) || 0 },
+  { key: "plants", source: "plants" },
+  { key: "utility", source: "utility" },
 ];
 
-const TIME_PRESETS: [string, number, number][] = [
-  ["весь раунд", 0, 300], ["с фризтаймом", -30, 300], ["0–20 с", 0, 20], ["20–45 с", 20, 45], ["45–75 с", 45, 75], ["75+ с", 75, 300],
+// [label: a locale key or null for "a–b s"], from, to
+const TIME_PRESETS: [Key | null, number, number][] = [
+  ["time.all", 0, 300], ["time.freeze", -30, 300], [null, 0, 20], [null, 20, 45], [null, 45, 75], [null, 75, 300],
 ];
-const RADII: [string, number][] = [["мелко", 3], ["средне", 7], ["широко", 12]];
+const presetLabel = ([key, a, b]: [Key | null, number, number]) => key ? t(key) : `${a}${b >= 300 ? "+" : `–${b}`} ${t("common.s")}`;
+const RADII: [Key, number][] = [["radius.fine", 3], ["radius.medium", 7], ["radius.wide", 12]];
 
 interface Filters {
   team: string;
@@ -211,94 +212,94 @@ export function MapsView({ match }: { match: MatchOverview }) {
   }, [assets, mode, rows, movement, size, view]);
 
   if (error || mapError) return <div className="error">{error ?? mapError}</div>;
-  if (!points || !assets) return <div>Загрузка…</div>;
+  if (!points || !assets) return <div>{t("common.loading")}</div>;
   const dpr = window.devicePixelRatio || 1;
   const count = mode.source === "movement"
-    ? movement ? `${Math.round(movement.player_seconds / 60)} игроко-минут` : "…"
-    : `точек: ${rows.length}`;
+    ? movement ? t("maps.playerMinutes", { n: Math.round(movement.player_seconds / 60) }) : "…"
+    : t("maps.points", { n: rows.length });
 
   return (
     <div>
       <div className="filters">
         <span className="seg wrap">
           {MODES.map((m) => (
-            <button key={m.key} className={modeKey === m.key ? "on" : ""} onClick={() => setModeKey(m.key)}>{m.label}</button>
+            <button key={m.key} className={modeKey === m.key ? "on" : ""} onClick={() => setModeKey(m.key)}>{td(`mode.${m.key}`, m.key)}</button>
           ))}
         </span>
       </div>
       <div className="filters">
         <select value={f.team} onChange={(e) => set({ team: e.target.value })}>
-          <option value="">все команды</option>
-          {teams.map((t) => <option key={t}>{t}</option>)}
+          <option value="">{t("common.allTeams")}</option>
+          {teams.map((tm) => <option key={tm}>{tm}</option>)}
         </select>
         <select value={f.side} onChange={(e) => set({ side: e.target.value })}>
-          <option value="">обе стороны</option>
+          <option value="">{t("common.bothSides")}</option>
           <option value="terrorist">T</option>
           <option value="counter-terrorist">CT</option>
         </select>
         <select value={f.player} onChange={(e) => set({ player: e.target.value })}>
-          <option value="">все игроки</option>
+          <option value="">{t("common.allPlayers")}</option>
           {players.map((p) => <option key={p}>{p}</option>)}
         </select>
         {weapons.length > 0 && (
           <select value={f.weapon} onChange={(e) => set({ weapon: e.target.value })}>
-            <option value="">любое оружие</option>
+            <option value="">{t("maps.anyWeapon")}</option>
             {weapons.map((w) => <option key={w}>{w}</option>)}
           </select>
         )}
         <label className="small">
-          раунды{" "}
+          {t("maps.rounds")}{" "}
           <input type="number" min={1} max={maxRound} value={f.roundFrom} onChange={(e) => set({ roundFrom: Number(e.target.value) })} />–
           <input type="number" min={1} max={maxRound} value={f.roundTo} onChange={(e) => set({ roundTo: Number(e.target.value) })} />
         </label>
       </div>
       <div className="filters">
-        <span className="small muted">время раунда:</span>
+        <span className="small muted">{t("maps.roundTime")}</span>
         <span className="seg">
-          {TIME_PRESETS.map(([label, a, b]) => (
-            <button key={label} className={f.tFrom === a && f.tTo === b ? "on" : ""} onClick={() => set({ tFrom: a, tTo: b })}>{label}</button>
+          {TIME_PRESETS.map((p) => (
+            <button key={`${p[1]}-${p[2]}`} className={f.tFrom === p[1] && f.tTo === p[2] ? "on" : ""} onClick={() => set({ tFrom: p[1], tTo: p[2] })}>{presetLabel(p)}</button>
           ))}
         </span>
         <label className="small">
-          с <input type="number" value={f.tFrom} onChange={(e) => set({ tFrom: Number(e.target.value) })} /> до{" "}
-          <input type="number" value={f.tTo} onChange={(e) => set({ tTo: Number(e.target.value) })} /> с после фризтайма
+          {t("common.from")} <input type="number" value={f.tFrom} onChange={(e) => set({ tFrom: Number(e.target.value) })} /> {t("common.to")}{" "}
+          <input type="number" value={f.tTo} onChange={(e) => set({ tTo: Number(e.target.value) })} /> {t("maps.afterFreeze")}
         </label>
         {mode.source === "utility" &&
-          Object.keys(types).map((t) => (
-            <label key={t} className="small" style={{ color: NADE_COLORS[t] }}>
-              <input type="checkbox" checked={types[t]} onChange={(e) => setTypes({ ...types, [t]: e.target.checked })} /> {NADE_LABELS[t]}
+          Object.keys(types).map((ty) => (
+            <label key={ty} className="small" style={{ color: NADE_COLORS[ty] }}>
+              <input type="checkbox" checked={types[ty]} onChange={(e) => setTypes({ ...types, [ty]: e.target.checked })} /> {td(`nades.${ty}`, ty)}
             </label>
           ))}
       </div>
       {mode.source !== "utility" && (
         <div className="filters small">
           <span className="seg">
-            {RADII.map(([label, r]) => <button key={label} className={view.radius === r ? "on" : ""} onClick={() => setView({ ...view, radius: r })}>{label}</button>)}
+            {RADII.map(([label, r]) => <button key={label} className={view.radius === r ? "on" : ""} onClick={() => setView({ ...view, radius: r })}>{t(label)}</button>)}
           </span>
           <select value={view.palette} onChange={(e) => setView({ ...view, palette: e.target.value })}>
-            {Object.entries(PALETTES).map(([k, p]) => <option key={k} value={k}>палитра: {p.label}</option>)}
+            {Object.keys(PALETTES).map((k) => <option key={k} value={k}>{t("maps.palette", { name: td(`palette.${k}`, k) })}</option>)}
           </select>
           <span className="seg">
-            <button className={view.scale === "log" ? "on" : ""} onClick={() => setView({ ...view, scale: "log" })} title="Видно и редкие места">лог. шкала</button>
-            <button className={view.scale === "linear" ? "on" : ""} onClick={() => setView({ ...view, scale: "linear" })} title="Видны только самые частые места">линейная</button>
+            <button className={view.scale === "log" ? "on" : ""} onClick={() => setView({ ...view, scale: "log" })} title={t("maps.logTitle")}>{t("maps.log")}</button>
+            <button className={view.scale === "linear" ? "on" : ""} onClick={() => setView({ ...view, scale: "linear" })} title={t("maps.linearTitle")}>{t("maps.linear")}</button>
           </span>
           <label>
-            прозрачность <input type="range" min={0.3} max={1} step={0.05} value={view.opacity} onChange={(e) => setView({ ...view, opacity: Number(e.target.value) })} />
+            {t("maps.opacity")} <input type="range" min={0.3} max={1} step={0.05} value={view.opacity} onChange={(e) => setView({ ...view, opacity: Number(e.target.value) })} />
           </label>
           {mode.source !== "movement" && (
-            <label><input type="checkbox" checked={view.dots} onChange={(e) => setView({ ...view, dots: e.target.checked })} /> точки</label>
+            <label><input type="checkbox" checked={view.dots} onChange={(e) => setView({ ...view, dots: e.target.checked })} /> {t("maps.dots")}</label>
           )}
         </div>
       )}
       <div className="filters small">
-        <label><input type="checkbox" checked={view.zones} onChange={(e) => setView({ ...view, zones: e.target.checked })} /> зоны карты</label>
+        <label><input type="checkbox" checked={view.zones} onChange={(e) => setView({ ...view, zones: e.target.checked })} /> {t("maps.zones")}</label>
         <span className="muted">{count}</span>
       </div>
-      {mode.source === "utility" && points.utility_error && <div className="warn">Гранаты недоступны: {points.utility_error}</div>}
+      {mode.source === "utility" && points.utility_error && <div className="warn">{t("maps.nadesUnavailable", { error: points.utility_error })}</div>}
       <canvas ref={canvasRef} width={size * n * dpr} height={size * dpr} style={{ width: size * n, height: size }} />
       <div className="muted small">
-        {mode.note}
-        {f.side ? ` Сторона: ${sideShort(f.side)}.` : ""}
+        {td(`mode.${mode.key}.note`, "")}
+        {f.side ? t("maps.sideNote", { side: sideShort(f.side) }) : ""}
       </div>
     </div>
   );

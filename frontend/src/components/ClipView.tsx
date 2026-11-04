@@ -5,7 +5,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type MatchOverview, type Replay, type Side } from "../api";
 import { canEncodeVideo, download, exportGif, exportMp4, zipWith } from "../clipExport";
-import { BUY_LABELS, clockOf, summarize, type ClipInfo, type Summary, type Track } from "../clipSummary";
+import { buyLabel, clockOf, summarize, type ClipInfo, type Summary, type Track } from "../clipSummary";
+import { t } from "../i18n";
 import {
   RADAR_SIZE, T_COLOR, drawRadar, levelLabel, levelOf, panelLevels, sideColor, sideShort, useMapAssets, worldToPx,
   type MapAssets,
@@ -412,7 +413,7 @@ function drawFrame(ctx: C2D, assets: MapAssets, c: Clip, T: number, levels: numb
 
   // header
   const pad = 12 * u;
-  const t = active[0]?.t ?? c.info.from;
+  const now = active[0]?.t ?? c.info.from;
   let alive = 0, total = 0;
   for (const { track, t: rt } of active) {
     for (const p of track.players) {
@@ -426,11 +427,11 @@ function drawFrame(ctx: C2D, assets: MapAssets, c: Clip, T: number, levels: numb
   ctx.textAlign = "right";
   ctx.fillStyle = "#fff";
   ctx.font = `700 ${46 * u}px system-ui, sans-serif`;
-  ctx.fillText(clockOf(t), lay.width - pad, 48 * u);
+  ctx.fillText(clockOf(now), lay.width - pad, 48 * u);
   ctx.font = `${15 * u}px system-ui, sans-serif`;
   ctx.fillStyle = "#c9cdd3";
-  ctx.fillText(`жив ${alive}/${total} · скорость ${speed}×`, lay.width - pad, 108 * u);
-  const rightW = Math.max(measureWith(ctx, `700 ${46 * u}px system-ui, sans-serif`, "1:55"), measureWith(ctx, `${15 * u}px system-ui, sans-serif`, `жив ${total}/${total} · скорость ${speed}×`));
+  ctx.fillText(t("clip.alive", { a: alive, t: total, s: speed }), lay.width - pad, 108 * u);
+  const rightW = Math.max(measureWith(ctx, `700 ${46 * u}px system-ui, sans-serif`, "1:55"), measureWith(ctx, `${15 * u}px system-ui, sans-serif`, t("clip.alive", { a: total, t: total, s: speed })));
   const textW = lay.width - rightW - 3 * pad;
   ctx.textAlign = "left";
   ctx.fillStyle = "#fff";
@@ -439,8 +440,11 @@ function drawFrame(ctx: C2D, assets: MapAssets, c: Clip, T: number, levels: numb
   fitText(ctx, subtitle(c), pad, 78 * u, textW, 400, 17 * u);
   ctx.fillStyle = "#8a94a3";
   const line3 = c.info.layout === "overlay"
-    ? `${c.tracks.length} ${plural(c.tracks.length, "раунд наложен", "раунда наложены", "раундов наложены")} друг на друга`
-    : active[0] ? `${active[0].track.label} против ${active[0].track.opponent ?? "?"} · ${active[0].index + 1} из ${c.tracks.length} · ${active[0].track.won ? "победа" : "поражение"}` : "";
+    ? t("clip.overlaid", { n: c.tracks.length })
+    : active[0] ? t("clip.seqLine", {
+      label: active[0].track.label, opp: active[0].track.opponent ?? "?", i: active[0].index + 1, n: c.tracks.length,
+      result: active[0].track.won ? t("common.win") : t("common.loss"),
+    }) : "";
   fitText(ctx, line3, pad, 108 * u, textW, 400, 15 * u);
 
   // footer: caption and legend
@@ -459,16 +463,16 @@ function drawFrame(ctx: C2D, assets: MapAssets, c: Clip, T: number, levels: numb
   const sideCol = c.tracks[0] ? sideColor(c.tracks[0].side) : T_COLOR;
   const items: [(x: number, yy: number) => void, string][][] = [
     [
-      [(x, yy) => playerMark(ctx, x - 3 * u, yy + 3 * u, 50, sideCol, u, true), c.info.kind === "team" ? "игроки, линия = куда смотрит" : "игрок, линия = куда смотрит"],
-      [(x, yy) => fragMark(ctx, x, yy, u), c.info.kind === "team" ? "их фраг" : "его фраг"],
-      [(x, yy) => deathMark(ctx, x, yy, u), c.info.kind === "team" ? "их смерть" : "его смерть"],
+      [(x, yy) => playerMark(ctx, x - 3 * u, yy + 3 * u, 50, sideCol, u, true), c.info.kind === "team" ? t("clip.lg.players") : t("clip.lg.player")],
+      [(x, yy) => fragMark(ctx, x, yy, u), c.info.kind === "team" ? t("clip.lg.theirKill") : t("clip.lg.hisKill")],
+      [(x, yy) => deathMark(ctx, x, yy, u), c.info.kind === "team" ? t("clip.lg.theirDeath") : t("clip.lg.hisDeath")],
     ],
     [
-      [(x, yy) => nadeMark(ctx, "smoke", x, yy, u), "смок"],
-      [(x, yy) => nadeMark(ctx, "molotov", x, yy, u), "молотов"],
-      [(x, yy) => nadeMark(ctx, "flashbang", x, yy, u), "флешка"],
-      [(x, yy) => nadeMark(ctx, "he", x, yy, u), "HE"],
-      [(x, yy) => plantMark(ctx, x, yy, u), "закладка C4"],
+      [(x, yy) => nadeMark(ctx, "smoke", x, yy, u), t("nade.smoke")],
+      [(x, yy) => nadeMark(ctx, "molotov", x, yy, u), t("nade.molotov")],
+      [(x, yy) => nadeMark(ctx, "flashbang", x, yy, u), t("nade.flashbang")],
+      [(x, yy) => nadeMark(ctx, "he", x, yy, u), t("nade.he")],
+      [(x, yy) => plantMark(ctx, x, yy, u), t("clip.lg.plant")],
     ],
   ];
   ctx.font = `${14 * u}px system-ui, sans-serif`;
@@ -502,21 +506,13 @@ function fitText(ctx: C2D, text: string, x: number, y: number, width: number, we
   ctx.fillText(text, x, y);
 }
 
-function plural(n: number, one: string, few: string, many: string) {
-  const d = n % 10, h = n % 100;
-  if (d === 1 && h !== 11) return one;
-  if (d >= 2 && d <= 4 && (h < 12 || h > 14)) return few;
-  return many;
-}
-
-
 function title(c: Clip) {
   return [c.info.name, c.summary.side, c.summary.mainZone ?? mapPretty(c.info.map)].filter(Boolean).join(" · ");
 }
 
 function subtitle(c: Clip) {
-  const vs = c.summary.opponents.length ? `против ${c.summary.opponents.join(", ")}` : "";
-  const buy = c.info.buy ? BUY_LABELS[c.info.buy] ?? c.info.buy : "";
+  const vs = c.summary.opponents.length ? t("clip.vsList", { list: c.summary.opponents.join(", ") }) : "";
+  const buy = c.info.buy ? buyLabel(c.info.buy) : "";
   return [c.info.kind === "player" ? c.info.team : "", mapPretty(c.info.map), [buy, vs].filter(Boolean).join(" ")].filter(Boolean).join(" · ");
 }
 
@@ -794,7 +790,7 @@ export function ClipView({ initial }: { initial?: MatchOverview }) {
         .join("_").replace(/[^\p{L}\p{N}_+-]+/gu, "_");
       const zip = await zipWith(`${base}.${format}`, media, `${base}.txt`, clip.summary.text);
       download(zip, `${base}.zip`);
-      setExported(`${base}.zip — ${(zip.size / 2 ** 20).toFixed(1)} МБ (${format.toUpperCase()} + описание .txt)`);
+      setExported(t("clip.savedWhat", { file: `${base}.zip`, mb: (zip.size / 2 ** 20).toFixed(1), fmt: format.toUpperCase() }));
     } catch (e) {
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
     } finally {
@@ -815,10 +811,10 @@ export function ClipView({ initial }: { initial?: MatchOverview }) {
   return (
     <div className="clip">
       <div className="clip-side">
-        <h3>Демки</h3>
+        <h3>{t("common.demos")}</h3>
         <MatchPicker map={map} setMap={setMap} ids={matchIds} setIds={setMatchIds} onError={setError} />
 
-        <h3>Кого показывать</h3>
+        <h3>{t("clip.who")}</h3>
         <select
           value={subject ? (subject.kind === "player" ? `p:${subject.steamid}` : `t:${subject.team}`) : ""}
           onChange={(e) => {
@@ -826,81 +822,78 @@ export function ClipView({ initial }: { initial?: MatchOverview }) {
             setSubject(v.startsWith("p:") ? { kind: "player", steamid: v.slice(2) } : { kind: "team", team: v.slice(2) });
           }}
         >
-          <optgroup label="Команда целиком">
-            {teams.map((t) => <option key={t} value={`t:${t}`}>{t}</option>)}
+          <optgroup label={t("clip.wholeTeam")}>
+            {teams.map((tm) => <option key={tm} value={`t:${tm}`}>{tm}</option>)}
           </optgroup>
           {[...new Set(roster.map((p) => p.team))].map((team) => (
-            <optgroup key={team} label={`Игроки — ${team}`}>
+            <optgroup key={team} label={t("clip.playersOf", { team })}>
               {roster.filter((p) => p.team === team).map((p) => (
-                <option key={p.steamid} value={`p:${p.steamid}`}>{p.name}{matchIds.length > 1 ? ` (${p.matches} из ${matchIds.length})` : ""}</option>
+                <option key={p.steamid} value={`p:${p.steamid}`}>{p.name}{matchIds.length > 1 ? t("clip.ofMatches", { n: p.matches, m: matchIds.length }) : ""}</option>
               ))}
             </optgroup>
           ))}
         </select>
 
-        <h3>Раунды ({chosen.length})</h3>
+        <h3>{t("clip.rounds", { n: chosen.length })}</h3>
         <div className="row small">
           <select value={sideFilter} onChange={(e) => setSideFilter(e.target.value as Side | "")}>
-            <option value="">обе стороны</option>
-            <option value="terrorist">за T</option>
-            <option value="counter-terrorist">за CT</option>
+            <option value="">{t("common.bothSides")}</option>
+            <option value="terrorist">{t("clip.asT")}</option>
+            <option value="counter-terrorist">{t("clip.asCT")}</option>
           </select>
           <select value={resultFilter} onChange={(e) => setResultFilter(e.target.value as "" | "won" | "lost")}>
-            <option value="">любой исход</option>
-            <option value="won">победы</option>
-            <option value="lost">поражения</option>
+            <option value="">{t("clip.anyResult")}</option>
+            <option value="won">{t("clip.wins")}</option>
+            <option value="lost">{t("clip.losses")}</option>
           </select>
           <select value={buyFilter} onChange={(e) => setBuyFilter(e.target.value)}>
-            <option value="">любой закуп</option>
-            {buys.map((b) => <option key={b} value={b}>{BUY_LABELS[b] ?? b}</option>)}
+            <option value="">{t("clip.anyBuy")}</option>
+            {buys.map((b) => <option key={b} value={b}>{buyLabel(b)}</option>)}
           </select>
         </div>
         {matchIds.map((id, i) => {
           const rows = options.filter((o) => o.matchId === id);
           return (
             <div key={id}>
-              {matchIds.length > 1 && <div className="muted small">M{i + 1} против {rows[0]?.opponent ?? "?"}</div>}
+              {matchIds.length > 1 && <div className="muted small">{t("clip.mVs", { no: i + 1, opp: rows[0]?.opponent ?? "?" })}</div>}
               <div className="round-chips">
                 {rows.map((o) => (
                   <button
                     key={o.key}
                     className={`chip ${picked.has(o.key) ? "on" : ""} ${o.won ? "won" : ""}`}
                     style={{ borderColor: sideColor(o.side), background: picked.has(o.key) ? sideColor(o.side) : undefined }}
-                    title={`${sideShort(o.side)}, ${BUY_LABELS[o.buy ?? ""] ?? o.buy ?? "?"}, ${o.won ? "победа" : "поражение"}`}
+                    title={`${sideShort(o.side)}, ${buyLabel(o.buy)}, ${o.won ? t("common.win") : t("common.loss")}`}
                     onClick={() => toggleRound(o.key)}
                   >
                     {o.round}
                   </button>
                 ))}
-                {!rows.length && <span className="muted small">{overviews.has(id) ? "игрок не играл в этом матче" : "загрузка…"}</span>}
+                {!rows.length && <span className="muted small">{overviews.has(id) ? t("clip.notPlayed") : t("common.loadingLower")}</span>}
               </div>
             </div>
           );
         })}
-        <div className="muted small">Рамка — сторона, жирный номер — раунд выигран. Клик добавляет или убирает раунд.</div>
+        <div className="muted small">{t("clip.chipsHint")}</div>
 
-        <h3>Как показывать</h3>
+        <h3>{t("clip.how")}</h3>
         <span className="seg">
-          <button className={layout === "overlay" ? "on" : ""} onClick={() => setLayout("overlay")} title="Все раунды одновременно, по времени раунда">наложение</button>
-          <button className={layout === "sequence" ? "on" : ""} onClick={() => setLayout("sequence")} title="Раунды друг за другом">по очереди</button>
+          <button className={layout === "overlay" ? "on" : ""} onClick={() => setLayout("overlay")} title={t("clip.overlayTitle")}>{t("clip.overlay")}</button>
+          <button className={layout === "sequence" ? "on" : ""} onClick={() => setLayout("sequence")} title={t("clip.sequenceTitle")}>{t("clip.sequence")}</button>
         </span>
         <div className="row small">
-          с <input type="number" value={from} min={-20} max={170} onChange={(e) => setFrom(Number(e.target.value))} /> с
-          до <input type="number" value={to ?? ""} placeholder="конец" min={1} max={200} onChange={(e) => setTo(e.target.value === "" ? null : Number(e.target.value))} /> с
-          <span className="muted">от конца фризтайма</span>
+          {t("common.from")} <input type="number" value={from} min={-20} max={170} onChange={(e) => setFrom(Number(e.target.value))} /> {t("common.s")}
+          {" "}{t("common.to")} <input type="number" value={to ?? ""} placeholder={t("clip.end")} min={1} max={200} onChange={(e) => setTo(e.target.value === "" ? null : Number(e.target.value))} /> {t("common.s")}
+          <span className="muted">{t("clip.afterFreeze")}</span>
         </div>
         <div className="layers small">
-          {([
-            ["trails", "пути"], ["view", "куда смотрит"], ["shots", "стрельба"], ["nades", "гранаты и C4"],
-            ["kills", "фраги и смерти"], ["others", "остальные игроки"], ["grid", "сетка"],
-          ] as [keyof Layers, string][]).map(([key, label]) => (
+          {(["trails", "view", "shots", "nades", "kills", "others", "grid"] as const).map((key) => (
             <label key={key}>
-              <input type="checkbox" checked={layers[key]} onChange={(e) => setLayers({ ...layers, [key]: e.target.checked })} /> {label}
+              <input type="checkbox" checked={layers[key]} onChange={(e) => setLayers({ ...layers, [key]: e.target.checked })} /> {t(`clip.layer.${key}`)}
             </label>
           ))}
         </div>
 
-        <h3>Экспорт</h3>
+        <h3>{t("clip.export")}</h3>
         <div className="row small">
           <span className="seg">
             <button className={format === "mp4" ? "on" : ""} disabled={!canEncodeVideo()} onClick={() => chooseFormat("mp4")}>MP4</button>
@@ -910,27 +903,27 @@ export function ClipView({ initial }: { initial?: MatchOverview }) {
             {SIZES.map((v) => <option key={v} value={v}>{v} px</option>)}
           </select>
           <select value={fps} onChange={(e) => setFps(Number(e.target.value))}>
-            {[10, 20, 25, 30].map((v) => <option key={v} value={v}>{v} к/с</option>)}
+            {[10, 20, 25, 30].map((v) => <option key={v} value={v}>{t("clip.fps", { n: v })}</option>)}
           </select>
         </div>
         <div className="muted small">
-          {lay.width}×{lay.height} · скорость {speed}× · {Math.round(total / speed)} с · {frames} кадров
-          {format === "gif" && frames * lay.width * lay.height > 400 * 768 * 1000 ? " · большой GIF, лучше MP4 или меньше размер" : ""}
+          {t("clip.stats", { w: lay.width, h: lay.height, s: speed, sec: Math.round(total / speed), frames })}
+          {format === "gif" && frames * lay.width * lay.height > 400 * 768 * 1000 ? t("clip.bigGif") : ""}
         </div>
         <div className="row">
           {exporting ? (
             <>
-              <div className="progress grow"><div className="progress-bar" style={{ width: `${exporting.progress * 100}%` }} /><span>кодирую {Math.round(exporting.progress * 100)}%</span></div>
-              <button onClick={() => exporting.abort.abort()}>Отмена</button>
+              <div className="progress grow"><div className="progress-bar" style={{ width: `${exporting.progress * 100}%` }} /><span>{t("clip.encoding", { p: Math.round(exporting.progress * 100) })}</span></div>
+              <button onClick={() => exporting.abort.abort()}>{t("common.cancel")}</button>
             </>
           ) : (
-            <button disabled={!clip || !clip.tracks.length || total <= 0} onClick={runExport}>Сохранить {format.toUpperCase()} + описание (.zip)</button>
+            <button disabled={!clip || !clip.tracks.length || total <= 0} onClick={runExport}>{t("clip.save", { fmt: format.toUpperCase() })}</button>
           )}
         </div>
-        {exported && <div className="small ok-text">Сохранено: {exported}</div>}
+        {exported && <div className="small ok-text">{t("clip.saved", { what: exported })}</div>}
         {clip && (
           <details className="small">
-            <summary>Описание для чата (.txt)</summary>
+            <summary>{t("clip.chatText")}</summary>
             <pre className="clip-text">{clip.summary.text}</pre>
           </details>
         )}
@@ -943,25 +936,25 @@ export function ClipView({ initial }: { initial?: MatchOverview }) {
             {playing ? "⏸" : "▶"}
           </button>
           <input type="range" className="grow" min={0} max={total || 1} step={0.05} value={T} onChange={(e) => seek(Number(e.target.value))} />
-          <span className="muted small clock-small">{T.toFixed(1)} / {total.toFixed(0)} с</span>
+          <span className="muted small clock-small">{T.toFixed(1)} / {total.toFixed(0)} {t("common.s")}</span>
           <span className="seg">
             {[1, 2, 4, 8].map((v) => <button key={v} className={speed === v ? "on" : ""} onClick={() => setSpeed(v)}>{v}×</button>)}
           </span>
           {assets && assets.meta.levels.length > 1 && (
             <span className="seg">
               {assets.meta.levels.map((_, i) => <button key={i} className={view === i ? "on" : ""} onClick={() => setView(i)}>{levelLabel(assets.meta, i)}</button>)}
-              <button className={view === "all" ? "on" : ""} onClick={() => setView("all")}>оба</button>
+              <button className={view === "all" ? "on" : ""} onClick={() => setView("all")}>{t("common.both")}</button>
             </span>
           )}
         </div>
         {mapError ? (
           <div className="error">{mapError}</div>
         ) : !matchIds.length ? (
-          <div className="muted">Выберите одну или несколько демок карты.</div>
+          <div className="muted">{t("common.pickDemos")}</div>
         ) : !clip ? (
-          <div className="muted">{loading ? `Загружаю раунды (${loaded}/${chosen.length})…` : chosen.length ? "Готовлю…" : "Нет раундов под фильтр."}</div>
+          <div className="muted">{loading ? t("clip.loadingRounds", { a: loaded, b: chosen.length }) : chosen.length ? t("clip.preparing") : t("clip.noRounds")}</div>
         ) : clip.tracks.length === 0 ? (
-          <div className="muted">В выбранных раундах этого игрока нет.</div>
+          <div className="muted">{t("clip.noPlayer")}</div>
         ) : (
           <canvas
             ref={canvasRef}

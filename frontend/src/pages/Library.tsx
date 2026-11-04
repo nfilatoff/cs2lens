@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, radarUrl, type Job, type Library, type LibraryMatch } from "../api";
 import { go } from "../App";
+import { t } from "../i18n";
 
 const ACCEPT = ".dem,.zip,.rar,.7z,.tar,.tgz,.gz,.bz2,.xz,.zst";
 const ARCHIVE = /\.(zip|rar|7z|tar|tgz|gz|bz2|xz|zst)$/i;
-const JOB_KINDS: Record<Job["kind"], string> = { extract: "разбор", replay: "кадры реплея", unpack: "распаковка" };
+const jobKind = (kind: Job["kind"]) => t(`job.${kind}`);
 
 interface Upload {
   name: string;
@@ -94,7 +95,7 @@ export function LibraryPage() {
   const addFiles = (files: File[]) => {
     const ok = files.filter((f) => f.name.toLowerCase().endsWith(".dem") || ARCHIVE.test(f.name));
     const bad = files.filter((f) => !ok.includes(f));
-    if (bad.length) setError(`Пропущены (не .dem и не архив): ${bad.map((f) => f.name).join(", ")}`);
+    if (bad.length) setError(t("lib.skipped", { files: bad.map((f) => f.name).join(", ") }));
     if (!ok.length) return;
     setUploads((list) => [
       ...list.filter((u) => !ok.some((f) => f.name === u.name)),
@@ -126,7 +127,7 @@ export function LibraryPage() {
   );
   const runningJobs = jobs.filter((j) => j.status === "queued" || j.status === "running" || (j.status === "error" && j.kind === "unpack"));
 
-  if (!lib) return <div className="page">{error ?? "Загрузка…"}</div>;
+  if (!lib) return <div className="page">{error ?? t("common.loading")}</div>;
 
   return (
     <div
@@ -143,34 +144,34 @@ export function LibraryPage() {
       }}
     >
       {error && (
-        <div className="error" onClick={() => setError(null)} title="Скрыть">
+        <div className="error" onClick={() => setError(null)} title={t("common.hide")}>
           {error}
         </div>
       )}
 
       <div className="pagehead">
-        <h1>Библиотека</h1>
-        <div className="sub">Разобранные матчи и демки в ваших папках</div>
+        <h1>{t("lib.title")}</h1>
+        <div className="sub">{t("lib.sub")}</div>
       </div>
 
       <div className="lib-filters">
         <select value={mapFilter} onChange={(e) => setMapFilter(e.target.value)}>
-          <option value="">все карты</option>
+          <option value="">{t("lib.allMaps")}</option>
           {maps.map((m) => <option key={m} value={m}>{mapLabel(m)}</option>)}
         </select>
         <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}>
-          <option value="">все команды</option>
+          <option value="">{t("common.allTeams")}</option>
           {teams.map((t) => <option key={t} value={t}>{t}</option>)}
         </select>
-        <input placeholder="поиск по названию или команде" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <input placeholder={t("lib.search")} value={search} onChange={(e) => setSearch(e.target.value)} />
         {(mapFilter || teamFilter || search) && (
-          <button className="link" onClick={() => { setMapFilter(""); setTeamFilter(""); setSearch(""); }}>сбросить</button>
+          <button className="link" onClick={() => { setMapFilter(""); setTeamFilter(""); setSearch(""); }}>{t("lib.reset")}</button>
         )}
       </div>
 
       <section>
-        <h2>Матчи <span className="count">{matches.length}{matches.length !== lib.matches.length ? ` из ${lib.matches.length}` : ""}</span></h2>
-        <div className="muted small">Разобранные демки лежат в {lib.out}</div>
+        <h2>{t("lib.matches")} <span className="count">{matches.length}{matches.length !== lib.matches.length ? t("lib.ofTotal", { n: lib.matches.length }) : ""}</span></h2>
+        <div className="muted small">{t("lib.outDir", { dir: lib.out })}</div>
         <div className="cards">
           {matches.map((m) => {
             const job = jobs.find((j) => j.match_id === m.id && j.kind === "replay" && j.status !== "done");
@@ -180,7 +181,7 @@ export function LibraryPage() {
               <div key={m.id} className="card clickable" onClick={() => go("match", m.id, "overview")}>
                 <button
                   className="card-del"
-                  title={m.busy ? "Идёт обработка" : "Удалить"}
+                  title={m.busy ? t("lib.busy") : t("common.delete")}
                   disabled={m.busy}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -206,43 +207,43 @@ export function LibraryPage() {
                 {m.error && <div className="error small">{m.error}</div>}
                 <div className="card-foot">
                   {m.has_replay ? (
-                    <span className="badge ok">реплей</span>
+                    <span className="badge ok">{t("lib.replayBadge")}</span>
                   ) : job ? (
-                    <span className="badge">{job.stage || "в очереди"}</span>
+                    <span className="badge">{job.stage || t("lib.queued")}</span>
                   ) : (
                     <button
                       className="small-btn"
-                      title="Нужен исходный .dem в одной из папок библиотеки"
+                      title={t("lib.needDem")}
                       onClick={(e) => {
                         e.stopPropagation();
                         run(api.buildReplayData(m.id));
                       }}
                     >
-                      данные для реплея
+                      {t("lib.replayData")}
                     </button>
                   )}
                 </div>
               </div>
             );
           })}
-          {matches.length === 0 && <div className="muted">Нет матчей под фильтр.</div>}
+          {matches.length === 0 && <div className="muted">{t("lib.noMatches")}</div>}
         </div>
       </section>
 
       <section>
-        <h2>Демки <span className="count">{demos.length}</span></h2>
+        <h2>{t("lib.demos")} <span className="count">{demos.length}</span></h2>
         <div className="row">
           <input
             className="grow"
-            placeholder="Папка с .dem, например D:\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo"
+            placeholder={t("lib.folderPlaceholder")}
             value={folder}
             onChange={(e) => setFolder(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && folder && run(api.addFolder(folder).then(() => setFolder("")))}
           />
           <button disabled={!folder} onClick={() => run(api.addFolder(folder).then(() => setFolder("")))}>
-            Добавить папку
+            {t("lib.addFolder")}
           </button>
-          <button onClick={() => fileInput.current?.click()}>Загрузить .dem или архив…</button>
+          <button onClick={() => fileInput.current?.click()}>{t("lib.upload")}</button>
           <input
             ref={fileInput}
             type="file"
@@ -257,7 +258,7 @@ export function LibraryPage() {
           />
         </div>
         <div className={`dropzone ${dragOver ? "over" : ""}`}>
-          Перетащите сюда .dem или архив (zip, rar, 7z, tar, gz, bz2, xz, zst) — демки из архива распакуются и разберутся сами.
+          {t("lib.drop")}
         </div>
 
         {uploads.length > 0 && (
@@ -268,18 +269,18 @@ export function LibraryPage() {
                 {u.status === "error" ? (
                   <span className="error">{u.error}</span>
                 ) : u.status === "skipped" ? (
-                  <span className="muted">уже есть в библиотеке</span>
+                  <span className="muted">{t("lib.alreadyIn")}</span>
                 ) : u.status === "done" ? (
-                  <span className="ok-text">загружено</span>
+                  <span className="ok-text">{t("lib.uploaded")}</span>
                 ) : (
                   <div style={{ width: 280 }}>
-                    <Progress value={u.size ? u.loaded / u.size : 0} label={u.status === "queued" ? "ждёт" : `загрузка ${(u.loaded / 2 ** 20).toFixed(0)}/${(u.size / 2 ** 20).toFixed(0)} МБ`} />
+                    <Progress value={u.size ? u.loaded / u.size : 0} label={u.status === "queued" ? t("lib.waiting") : t("lib.uploading", { done: (u.loaded / 2 ** 20).toFixed(0), total: (u.size / 2 ** 20).toFixed(0) })} />
                   </div>
                 )}
               </div>
             ))}
             {uploads.every((u) => u.status !== "queued" && u.status !== "uploading") && (
-              <button className="link small" onClick={() => setUploads([])}>очистить список</button>
+              <button className="link small" onClick={() => setUploads([])}>{t("lib.clearList")}</button>
             )}
           </div>
         )}
@@ -288,12 +289,12 @@ export function LibraryPage() {
           <div className="uploads">
             {runningJobs.map((j) => (
               <div key={j.id} className="row small">
-                <span className="grow">{JOB_KINDS[j.kind]}: {j.target.split(/[\\/]/).pop()}</span>
+                <span className="grow">{jobKind(j.kind)}: {j.target.split(/[\\/]/).pop()}</span>
                 {j.status === "error" ? (
                   <span className="error">{j.error}</span>
                 ) : (
                   <div style={{ width: 280 }}>
-                    <Progress value={j.progress} label={j.status === "queued" ? "в очереди" : j.stage} />
+                    <Progress value={j.progress} label={j.status === "queued" ? t("lib.queued") : j.stage} />
                   </div>
                 )}
               </div>
@@ -307,14 +308,14 @@ export function LibraryPage() {
               <li key={f}>
                 {f}{" "}
                 <button className="link" onClick={() => run(api.removeFolder(f))}>
-                  убрать
+                  {t("lib.remove")}
                 </button>
               </li>
             ))}
           </ul>
         )}
         <label className="small">
-          <input type="checkbox" checked={hideExtracted} onChange={(e) => setHideExtracted(e.target.checked)} /> скрыть уже разобранные
+          <input type="checkbox" checked={hideExtracted} onChange={(e) => setHideExtracted(e.target.checked)} /> {t("lib.hideParsed")}
         </label>
         <table className="demos">
           <tbody>
@@ -323,20 +324,20 @@ export function LibraryPage() {
               return (
                 <tr key={d.path}>
                   <td className="muted">{mapLabel(d.map)}</td>
-                  <td title={d.path}>{d.name}{d.uploaded && <span className="muted small"> · загружена</span>}</td>
-                  <td className="num muted">{d.size_mb} МБ</td>
+                  <td title={d.path}>{d.name}{d.uploaded && <span className="muted small">{t("lib.uploadedTag")}</span>}</td>
+                  <td className="num muted">{t("common.mb", { n: d.size_mb })}</td>
                   <td className="status">
                     {job ? (
                       job.status === "error" ? (
                         <span className="error small">{job.error}</span>
                       ) : (
-                        <Progress value={job.progress} label={job.status === "queued" ? "в очереди" : job.stage} />
+                        <Progress value={job.progress} label={job.status === "queued" ? t("lib.queued") : job.stage} />
                       )
                     ) : d.extracted ? (
-                      <a className="badge ok" href={`#/match/${encodeURIComponent(d.match_id)}/overview`}>разобрана</a>
+                      <a className="badge ok" href={`#/match/${encodeURIComponent(d.match_id)}/overview`}>{t("lib.parsed")}</a>
                     ) : (
                       <button className="small-btn" onClick={() => run(api.extract(d.path))}>
-                        Разобрать
+                        {t("lib.parse")}
                       </button>
                     )}
                   </td>
@@ -344,10 +345,10 @@ export function LibraryPage() {
                     <button
                       className="link small"
                       disabled={!!job}
-                      title="Удалить файл .dem с диска"
-                      onClick={() => window.confirm(`Удалить файл ${d.name} с диска?\n${d.path}`) && run(api.deleteDemo(d.path))}
+                      title={t("lib.deleteDemoTitle")}
+                      onClick={() => window.confirm(t("lib.deleteDemoConfirm", { name: d.name, path: d.path })) && run(api.deleteDemo(d.path))}
                     >
-                      удалить
+                      {t("common.deleteLower")}
                     </button>
                   </td>
                 </tr>
@@ -356,7 +357,7 @@ export function LibraryPage() {
             {demos.length === 0 && (
               <tr>
                 <td className="muted">
-                  {lib.demos.length ? "Все демки под фильтр уже разобраны." : "Добавьте папку с демками или загрузите файл."}
+                  {lib.demos.length ? t("lib.allParsed") : t("lib.empty")}
                 </td>
               </tr>
             )}
@@ -387,20 +388,20 @@ function DeleteDialog({ match, hasDemo, onCancel, onConfirm }: {
   return (
     <div className="modal-bg" onClick={onCancel}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>Удалить матч?</h3>
+        <h3>{t("del.title")}</h3>
         <p>
-          <b>{match.id}</b> ({mapLabel(match.map)}). Удаляется разбор: таблицы, кэш реплея, картинки. Это нельзя отменить.
+          <b>{match.id}</b> {t("del.body", { map: mapLabel(match.map) })}
         </p>
         {hasDemo ? (
           <label>
-            <input type="checkbox" checked={withDemo} onChange={(e) => setWithDemo(e.target.checked)} /> удалить и исходный .dem
+            <input type="checkbox" checked={withDemo} onChange={(e) => setWithDemo(e.target.checked)} /> {t("del.withDemo")}
           </label>
         ) : (
-          <div className="muted small">Исходный .dem не найден в библиотеке — удалится только разбор.</div>
+          <div className="muted small">{t("del.noDemo")}</div>
         )}
         <div className="row">
-          <button onClick={onCancel}>Отмена</button>
-          <button className="danger" onClick={() => onConfirm(withDemo)}>Удалить</button>
+          <button onClick={onCancel}>{t("common.cancel")}</button>
+          <button className="danger" onClick={() => onConfirm(withDemo)}>{t("common.delete")}</button>
         </div>
       </div>
     </div>

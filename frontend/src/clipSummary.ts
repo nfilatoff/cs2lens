@@ -5,16 +5,15 @@ import type { MapMeta, Replay, ReplayPlayer, Side } from "./api";
 import { sideShort } from "./radar";
 import { fmtClock, playerState, weaponName } from "./replayDraw";
 import { hasZones, zoneAt } from "./zones";
+import { t, td } from "./i18n";
 
 export const ROUND_TIME = 115;
 const SPAWN_GROUPS = new Set(["t_spawn", "ct_spawn"]);
 const NADE_MIN_SHARE = 0.2; // a grenade spot makes the caption when it is in at least 20% of the rounds
 const TABLE_STEP = 5; // seconds between rows of the position table
 
-export const BUY_LABELS: Record<string, string> = { full: "фулл-бай", force: "форс", eco: "эко", pistol: "пистолетки", semi: "полу-бай" };
-const NADE_NAMES: Record<string, string> = {
-  smoke: "смок", flashbang: "флешка", he: "HE", molotov: "молотов", incendiary: "молотов", decoy: "декой",
-};
+export const buyLabel = (buy: string | null | undefined) => (buy ? td(`buy.${buy}`, buy) : "?");
+const nadeName = (type: string) => td(`nade.${type}`, type);
 
 export interface Track {
   key: string; // `${matchId}#${round}`
@@ -52,7 +51,7 @@ export interface Summary {
   text: string;
 }
 
-export const clockOf = (t: number) => (t < 0 ? `фризтайм ${fmtClock(-t)}` : fmtClock(ROUND_TIME - t));
+export const clockOf = (sec: number) => (sec < 0 ? t("clock.freeze", { t: fmtClock(-sec) }) : fmtClock(ROUND_TIME - sec));
 const tickOf = (tr: Track, t: number) => tr.r.freeze_end_tick + t * tr.r.tick_rate;
 const secOf = (tr: Track, tick: number) => (tick - tr.r.freeze_end_tick) / tr.r.tick_rate;
 const median = (v: number[]) => {
@@ -122,20 +121,26 @@ export function summarize(tracks: Track[], meta: MapMeta, info: ClipInfo): Summa
   for (const tr of tracks) {
     for (const k of tr.r.kills) {
       if (!inWindow(tr, k.tick)) continue;
-      const t = secOf(tr, k.tick);
+      const sec = secOf(tr, k.tick);
       if (k.attacker && tr.ids.has(k.attacker)) {
         const az = zoneName(k.ax, k.ay, k.az);
         fragZones.set(az, (fragZones.get(az) ?? 0) + 1);
-        frags.push(`${tr.label}  ${clockOf(t)}  ${k.attacker_name} (${az}) → ${k.victim_name} (${zoneName(k.vx, k.vy, k.vz)}), ${weaponName(k.weapon)}${k.headshot ? ", в голову" : ""}${k.trade ? ", размен" : ""}`);
+        frags.push(t("sum.frag", {
+          label: tr.label, clock: clockOf(sec), attacker: k.attacker_name, az, victim: k.victim_name, vz: zoneName(k.vx, k.vy, k.vz),
+          weapon: weaponName(k.weapon), hs: k.headshot ? t("sum.hs") : "", trade: k.trade ? t("sum.trade") : "",
+        }));
       }
       if (tr.ids.has(k.victim)) {
-        deaths.push(`${tr.label}  ${clockOf(t)}  ${k.victim_name} умер в ${zoneName(k.vx, k.vy, k.vz)} от ${k.attacker_name ?? "мира"} (${weaponName(k.weapon)})${k.traded ? ", разменян" : ""}`);
+        deaths.push(t("sum.death", {
+          label: tr.label, clock: clockOf(sec), victim: k.victim_name, zone: zoneName(k.vx, k.vy, k.vz),
+          attacker: k.attacker_name ?? t("sum.world"), weapon: weaponName(k.weapon), traded: k.traded ? t("sum.traded") : "",
+        }));
       }
     }
     const names = new Set(tr.players.map((p) => p.name));
     for (const b of tr.r.bomb) {
       if (b.event === "finish_plant" && b.player && names.has(b.player) && inWindow(tr, b.tick)) {
-        plants.push(`${tr.label}  ${clockOf(secOf(tr, b.tick))}  ${b.player} — плант ${b.site ?? "?"}`);
+        plants.push(t("sum.plant", { label: tr.label, clock: clockOf(secOf(tr, b.tick)), player: b.player, site: b.site ?? "?" }));
       }
     }
   }
@@ -143,64 +148,69 @@ export function summarize(tracks: Track[], meta: MapMeta, info: ClipInfo): Summa
   // caption: the most consistent position and the regular grenades
   let caption: string | null = null;
   const parts: string[] = [];
-  if (zones && best) parts.push(`${best.zone} на ${clockOf(best.t)} в ${best.n} из ${N}`);
+  if (zones && best) parts.push(t("sum.capPos", { zone: best.zone, clock: clockOf(best.t), n: best.n, N }));
   if (zones) {
     const regular = nades.filter((g) => g.zone !== "?" && g.rounds.size >= Math.max(2, NADE_MIN_SHARE * N)).slice(0, 3);
-    const phrase = regular.map((g) => `${NADE_NAMES[g.type] ?? g.type} ${g.zone} ~${clockOf(median(g.times))} (${g.rounds.size} из ${N})`).join(", ");
+    const phrase = regular.map((g) => t("sum.capNade", { nade: nadeName(g.type), zone: g.zone, clock: clockOf(median(g.times)), n: g.rounds.size, N })).join(", ");
     if (phrase) parts.push(phrase[0].toUpperCase() + phrase.slice(1));
   }
   if (parts.length) caption = parts.join(". ") + ".";
 
   // the text file
   const L: string[] = [];
-  const who = info.kind === "player" ? `Игрок: ${info.name} (${info.team})` : `Команда: ${info.name}`;
-  L.push(`Клип cs2lens — ${info.name} · ${sides.join("+")} · ${info.map}`);
+  const who = info.kind === "player" ? t("sum.player", { name: info.name, team: info.team }) : t("sum.team", { name: info.name });
+  L.push(t("sum.header", { name: info.name, sides: sides.join("+"), map: info.map }));
   L.push(who);
-  L.push(`Карта: ${info.map} · сторона: ${sides.join("+")} · закуп: ${info.buy ? BUY_LABELS[info.buy] ?? info.buy : "любой"}`);
-  L.push(`Соперники: ${opponents.join(", ") || "?"}`);
-  L.push(`Матчи (${info.matches.length}):`);
-  for (const m of info.matches) L.push(`  M${m.no}  ${m.id}${m.opponent ? `  против ${m.opponent}` : ""}`);
-  L.push(`Раундов: ${N} (${info.layout === "overlay" ? "наложены друг на друга" : "по очереди"}) · окно: ${info.from}…${Math.round(tEnd)} с после фризтайма (${clockOf(info.from)} → ${clockOf(tEnd)})`);
+  L.push(t("sum.mapLine", { map: info.map, sides: sides.join("+"), buy: info.buy ? buyLabel(info.buy) : t("sum.anyBuy") }));
+  L.push(t("sum.opponents", { list: opponents.join(", ") || "?" }));
+  L.push(t("sum.matches", { n: info.matches.length }));
+  for (const m of info.matches) L.push(`  M${m.no}  ${m.id}${m.opponent ? t("sum.matchVs", { opp: m.opponent }) : ""}`);
+  L.push(t("sum.roundsLine", {
+    n: N, layout: info.layout === "overlay" ? t("sum.layoutOverlay") : t("sum.layoutSeq"), from: info.from, to: Math.round(tEnd),
+    c1: clockOf(info.from), c2: clockOf(tEnd),
+  }));
   const won = tracks.filter((tr) => tr.won).length;
-  L.push(`Исход: ${won} побед, ${N - won} поражений`);
+  L.push(t("sum.result", { w: won, l: N - won }));
   L.push("");
-  L.push(`Подпись (собрана кодом${zones ? "" : "; у карты нет конфига зон, поэтому без неё"}):`);
+  L.push(t("sum.caption", { noZones: zones ? "" : t("sum.noZones") }));
   L.push(caption ?? "—");
   L.push("");
-  L.push(`Позиция по времени (зона: сколько ${info.kind === "player" ? "раундов" : "игроко-раундов"} из живых; часы раунда):`);
+  L.push(t("sum.positions", { unit: info.kind === "player" ? t("sum.unitRounds") : t("sum.unitPlayerRounds") }));
   for (const row of table) {
     const top = row.zones.slice(0, 4).map(([zn, n]) => `${zn} ${n}`).join(", ");
-    L.push(`  ${clockOf(row.t).padStart(5)}  жив ${row.alive}/${row.total}  ${top}`);
+    L.push(`  ${clockOf(row.t).padStart(5)}  ${t("sum.alive", { a: row.alive, t: row.total })}  ${top}`);
   }
   L.push("");
-  L.push("Гранаты (тип · куда легла · медиана времени · в скольких раундах · кто):");
-  if (!nades.length) L.push("  нет");
+  L.push(t("sum.nades"));
+  if (!nades.length) L.push(`  ${t("sum.none")}`);
   for (const g of nades) {
-    L.push(`  ${NADE_NAMES[g.type] ?? g.type} · ${g.zone} · ~${clockOf(median(g.times))} · ${g.rounds.size} из ${N}${info.kind === "team" ? ` · ${[...g.who].join(", ")}` : ""}`);
+    L.push(`  ${nadeName(g.type)} · ${g.zone} · ~${clockOf(median(g.times))} · ${t("sum.of", { n: g.rounds.size, N })}${info.kind === "team" ? ` · ${[...g.who].join(", ")}` : ""}`);
   }
   L.push("");
   const topFrag = [...fragZones].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([zn, n]) => `${zn} ${n}`).join(", ");
-  L.push(`Фраги: ${frags.length}${topFrag ? ` (откуда чаще: ${topFrag})` : ""}`);
+  L.push(t("sum.frags", { n: frags.length, top: topFrag ? t("sum.fragTop", { list: topFrag }) : "" }));
   frags.forEach((f) => L.push(`  ${f}`));
-  L.push(`Смерти: ${deaths.length}`);
+  L.push(t("sum.deaths", { n: deaths.length }));
   deaths.forEach((d) => L.push(`  ${d}`));
   if (plants.length) {
-    L.push(`Закладки C4: ${plants.length}`);
+    L.push(t("sum.plants", { n: plants.length }));
     plants.forEach((p) => L.push(`  ${p}`));
   }
   L.push("");
-  L.push("По раундам:");
+  L.push(t("sum.byRound"));
   for (const tr of tracks) {
     const thrown = tr.r.grenades
       .filter((g) => g.thrower && tr.ids.has(g.thrower) && inWindow(tr, g.t[0]))
-      .map((g) => `${NADE_NAMES[g.type] ?? g.type} ${zoneName(g.x[g.x.length - 1], g.y[g.y.length - 1], g.z[g.z.length - 1])} ${clockOf(secOf(tr, g.end))}`);
+      .map((g) => `${nadeName(g.type)} ${zoneName(g.x[g.x.length - 1], g.y[g.y.length - 1], g.z[g.z.length - 1])} ${clockOf(secOf(tr, g.end))}`);
     const k = tr.r.kills.filter((x) => x.attacker && tr.ids.has(x.attacker) && inWindow(tr, x.tick)).length;
     const d = tr.r.kills.filter((x) => tr.ids.has(x.victim) && inWindow(tr, x.tick)).length;
-    L.push(`  ${tr.label} против ${tr.opponent ?? "?"} · ${sideShort(tr.side)} · ${BUY_LABELS[tr.buy ?? ""] ?? tr.buy ?? "?"} · ${tr.won ? "победа" : "поражение"} · фраги ${k}, смерти ${d}`);
-    if (thrown.length) L.push(`      гранаты: ${thrown.join("; ")}`);
+    L.push(`  ${t("sum.roundLine", {
+      label: tr.label, opp: tr.opponent ?? "?", side: sideShort(tr.side), buy: buyLabel(tr.buy), result: tr.won ? t("common.win") : t("common.loss"), k, d,
+    })}`);
+    if (thrown.length) L.push(`      ${t("sum.roundNades", { list: thrown.join("; ") })}`);
   }
   L.push("");
-  L.push("Время — часы раунда (1:55 = конец фризтайма). Зоны — callouts из конфига карты cs2lens.");
+  L.push(t("sum.footer"));
 
   return { caption, mainZone: best?.zone ?? null, opponents, side: sides.join("+"), text: L.join("\n") };
 }

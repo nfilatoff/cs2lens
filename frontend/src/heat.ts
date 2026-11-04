@@ -6,11 +6,12 @@ export const GRID = 256;
 const CELL = RADAR_SIZE / GRID;
 
 type Stop = [number, [number, number, number]];
-export const PALETTES: Record<string, { label: string; stops: Stop[] }> = {
-  inferno: { label: "огонь", stops: [[0, [0, 0, 4]], [0.25, [87, 16, 110]], [0.5, [188, 55, 84]], [0.75, [249, 142, 9]], [1, [252, 255, 164]]] },
-  viridis: { label: "зелёная", stops: [[0, [68, 1, 84]], [0.25, [59, 82, 139]], [0.5, [33, 145, 140]], [0.75, [94, 201, 98]], [1, [253, 231, 37]]] },
-  ice: { label: "лёд", stops: [[0, [8, 16, 48]], [0.35, [30, 90, 200]], [0.7, [80, 200, 255]], [1, [240, 255, 255]]] },
-  red: { label: "красная", stops: [[0, [60, 0, 0]], [0.5, [220, 30, 30]], [1, [255, 230, 120]]] },
+// names are palette.<key> in the locales
+export const PALETTES: Record<string, { stops: Stop[] }> = {
+  inferno: { stops: [[0, [0, 0, 4]], [0.25, [87, 16, 110]], [0.5, [188, 55, 84]], [0.75, [249, 142, 9]], [1, [252, 255, 164]]] },
+  viridis: { stops: [[0, [68, 1, 84]], [0.25, [59, 82, 139]], [0.5, [33, 145, 140]], [0.75, [94, 201, 98]], [1, [253, 231, 37]]] },
+  ice: { stops: [[0, [8, 16, 48]], [0.35, [30, 90, 200]], [0.7, [80, 200, 255]], [1, [240, 255, 255]]] },
+  red: { stops: [[0, [60, 0, 0]], [0.5, [220, 30, 30]], [1, [255, 230, 120]]] },
 };
 
 function color(stops: Stop[], v: number): [number, number, number] {

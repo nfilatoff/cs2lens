@@ -1,129 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MatchOverview, Replay } from "../api";
 import { go } from "../App";
-import { REASONS } from "../pages/Match";
+import { reasonLabel } from "../pages/Match";
+import { CT_COLOR, RADAR_SIZE, T_COLOR, levelLabel, levelOf, panelLevels, sideColor, sideShort, useMapAssets, worldToPx } from "../radar";
 import {
-  CT_COLOR, RADAR_SIZE, T_COLOR, drawRadar, levelLabel, levelOf, panelLevels, sideColor, sideShort, useMapAssets, worldToPx,
-  type MapAssets,
-} from "../radar";
-import {
-  NADE_COLORS, bombState, drawArea, drawGrenade, drawKillMark, drawPlayer, drawShots, fmtClock, frameAt, killAt, loadReplay,
-  playerStates, weaponName, type PlayerState,
+  BOMB_TIME, NADE_COLORS, ROUND_TIME, bombState, drawRound, fmtClock, frameAt, killAt, loadReplay, playerStates, weaponName, type PlayerState,
 } from "../replayDraw";
+import { t } from "../i18n";
 import { KillCard } from "./KillCard";
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
-const ROUND_TIME = 115; // seconds of round clock after freeze time
-const BOMB_TIME = 40;
 const KILLFEED_SEC = 6;
-
-interface DrawOpts {
-  names: boolean;
-  weapons: boolean;
-  trails: boolean;
-  shots: boolean;
-  hoverKill: number; // index into r.kills, -1 for none
-}
-
-// ---- drawing ----
-function draw(ctx: CanvasRenderingContext2D, assets: MapAssets, r: Replay, tick: number, levels: number[], size: number, opts: DrawOpts) {
-  const { meta, images } = assets;
-  const states = playerStates(r, tick);
-  const bomb = bombState(r, tick);
-  const multi = meta.levels.length > 1;
-  const k = size / RADAR_SIZE; // screen px per radar px
-  const s = 1 / k; // radar px per screen px
-
-  levels.forEach((li, panel) => {
-    const ox = panel * size;
-    drawRadar(ctx, images[li], ox, size);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(ox, 0, size, size);
-    ctx.clip();
-    ctx.translate(ox, 0);
-    ctx.scale(k, k);
-    const vis = (z: number | null | undefined) => (!multi || levelOf(meta, z) === li ? 1 : 0.15);
-    const P = (x: number, y: number) => worldToPx(meta, x, y);
-
-    // smokes and fires with their real lifetimes
-    for (const a of r.smokes) {
-      if (tick < a.start || tick > a.end) continue;
-      const fadeIn = Math.min(1, (tick - a.start) / r.tick_rate);
-      const fadeOut = Math.min(1, (a.end - tick) / (2 * r.tick_rate));
-      drawArea(ctx, "smoke", a.x, a.y, P, meta.scale, Math.min(fadeIn, fadeOut) * vis(a.z));
-      const [px, py] = P(a.x, a.y);
-      ctx.globalAlpha = vis(a.z);
-      ctx.fillStyle = "#222";
-      ctx.font = `${10 * s}px sans-serif`;
-      ctx.textAlign = "center";
-      ctx.fillText(String(Math.ceil((a.end - tick) / r.tick_rate)), px, py + 4 * s);
-      ctx.globalAlpha = 1;
-    }
-    for (const a of r.fires) {
-      if (tick >= a.start && tick <= a.end) drawArea(ctx, "fire", a.x, a.y, P, meta.scale, vis(a.z));
-    }
-
-    // grenades in flight, with the path so far
-    for (const g of r.grenades) {
-      if (tick < g.t[0] || tick > g.end + 0.25 * r.tick_rate) continue;
-      const z = g.z[frameAt(g.t, tick)[0]];
-      drawGrenade(ctx, g, tick, r.tick_rate, P, s, meta.scale, g.side ? sideColor(g.side) : NADE_COLORS[g.type] ?? "#ccc", vis(z), opts.trails);
-    }
-
-    // death crosses; the hovered one is drawn last, with the killer and the line of fire
-    r.kills.forEach((kill, i) => {
-      if (kill.tick <= tick && i !== opts.hoverKill) drawKillMark(ctx, kill, P, s, sideColor(kill.victim_side), 0.9 * vis(kill.vz));
-    });
-
-    // bomb on the ground or planted
-    const b = bomb.planted ?? bomb.dropped;
-    if (b) {
-      const [px, py] = P(b.x, b.y);
-      const blink = bomb.planted && !bomb.defused ? 0.5 + 0.5 * Math.sin(tick / 6) : 1;
-      ctx.globalAlpha = vis(b.z) * blink;
-      ctx.fillStyle = bomb.defused ? "#3ddc84" : "#ff3030";
-      ctx.fillRect(px - 5 * s, py - 4 * s, 10 * s, 8 * s);
-      ctx.strokeStyle = "#000";
-      ctx.lineWidth = 1 * s;
-      ctx.strokeRect(px - 5 * s, py - 4 * s, 10 * s, 8 * s);
-      ctx.globalAlpha = 1;
-    }
-
-    // bullet tracers: to the player hit, or a fading ray along the view direction
-    const zOf = new Map(states.map((st) => [st.p.steamid, st.z]));
-    const sideOf = new Map(states.map((st) => [st.p.steamid, st.p.side]));
-    if (opts.shots) {
-      drawShots(ctx, r, tick, P, s, meta.scale, (id) => vis(zOf.get(id)) === 1, (id) => sideColor(sideOf.get(id)));
-    }
-    const shooting = new Set<string>();
-    for (let q = r.shots.tick.length - 1; q >= 0 && r.shots.tick[q] >= tick - 3; q--) {
-      if (r.shots.tick[q] <= tick) shooting.add(r.shots.player[q]);
-    }
-
-    // players
-    for (const st of states) {
-      if (st.hp <= 0 || Number.isNaN(st.x)) continue;
-      const [px, py] = P(st.x, st.y);
-      drawPlayer(ctx, st, px, py, s, tick, {
-        color: sideColor(st.p.side), alpha: vis(st.z), label: opts.names ? st.p.name : null,
-        weapon: opts.weapons, cone: true, shooting: shooting.has(st.p.steamid),
-      });
-    }
-    if (opts.hoverKill >= 0) {
-      const kill = r.kills[opts.hoverKill];
-      drawKillMark(ctx, kill, P, s, sideColor(kill.victim_side), vis(kill.vz) === 1 ? 1 : 0.4, true);
-    }
-    ctx.restore();
-    ctx.globalAlpha = 1;
-    if (multi) {
-      ctx.fillStyle = "#fff";
-      ctx.font = "13px sans-serif";
-      ctx.textAlign = "left";
-      ctx.fillText(levelLabel(meta, li), ox + 10, 20);
-    }
-  });
-}
 
 // ---- component ----
 export function ReplayView({ match, round, at }: { match: MatchOverview; round: number; at?: number }) {
@@ -179,7 +66,7 @@ export function ReplayView({ match, round, at }: { match: MatchOverview; round: 
     const ctx = c.getContext("2d")!;
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    draw(ctx, assets, data, tickRef.current, levels, size, { ...opts, hoverKill: hover?.kill ?? -1 });
+    drawRound(ctx, assets, data, tickRef.current, levels, size, { ...opts, hoverKill: hover?.kill ?? -1 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assets, data, size, levels.join(","), opts, hover?.kill]);
 
@@ -307,33 +194,33 @@ export function ReplayView({ match, round, at }: { match: MatchOverview; round: 
         <select value={round} onChange={(e) => go("match", match.id, "replay", e.target.value)}>
           {match.timeline.map((r) => (
             <option key={r.round} value={r.round}>
-              Раунд {r.round} — {r.winner ?? sideShort(r.winner_side)} ({REASONS[r.reason] ?? r.reason})
+              {t("replay.roundOpt", { round: r.round, winner: r.winner ?? sideShort(r.winner_side), reason: reasonLabel(r.reason) })}
             </option>
           ))}
         </select>
         <button disabled={roundIdx >= rounds.length - 1} onClick={() => go("match", match.id, "replay", rounds[roundIdx + 1])}>] ▶</button>
         {data && <Clock r={data} tick={uiTick} />}
-        {loadMs !== null && <span className="muted small">загружено за {loadMs} мс{data?.low_res ? " · шаг 0.5 с (нет replay.parquet)" : ""}</span>}
+        {loadMs !== null && <span className="muted small">{t("replay.loaded", { ms: loadMs })}{data?.low_res ? t("replay.lowRes") : ""}</span>}
         <span className="grow" />
         {assets && assets.meta.levels.length > 1 && (
           <span className="seg">
             {assets.meta.levels.map((_, i) => (
               <button key={i} className={view === i ? "on" : ""} onClick={() => setView(i)}>{levelLabel(assets.meta, i)}</button>
             ))}
-            <button className={view === "all" ? "on" : ""} onClick={() => setView("all")}>оба</button>
+            <button className={view === "all" ? "on" : ""} onClick={() => setView("all")}>{t("common.both")}</button>
           </span>
         )}
-        <label className="small"><input type="checkbox" checked={opts.names} onChange={(e) => setOpts({ ...opts, names: e.target.checked })} /> имена</label>
-        <label className="small"><input type="checkbox" checked={opts.weapons} onChange={(e) => setOpts({ ...opts, weapons: e.target.checked })} /> оружие</label>
-        <label className="small"><input type="checkbox" checked={opts.trails} onChange={(e) => setOpts({ ...opts, trails: e.target.checked })} /> траектории</label>
-        <label className="small"><input type="checkbox" checked={opts.shots} onChange={(e) => setOpts({ ...opts, shots: e.target.checked })} /> выстрелы</label>
+        <label className="small"><input type="checkbox" checked={opts.names} onChange={(e) => setOpts({ ...opts, names: e.target.checked })} /> {t("replay.names")}</label>
+        <label className="small"><input type="checkbox" checked={opts.weapons} onChange={(e) => setOpts({ ...opts, weapons: e.target.checked })} /> {t("replay.weapons")}</label>
+        <label className="small"><input type="checkbox" checked={opts.trails} onChange={(e) => setOpts({ ...opts, trails: e.target.checked })} /> {t("replay.trails")}</label>
+        <label className="small"><input type="checkbox" checked={opts.shots} onChange={(e) => setOpts({ ...opts, shots: e.target.checked })} /> {t("replay.shots")}</label>
       </div>
 
       <div className="replay-body">
         <TeamPanel states={states.filter((s) => s.p.side === "counter-terrorist")} title={data?.teams["counter-terrorist"] ?? "CT"} color={CT_COLOR} />
         <div className="replay-stage" ref={boxRef}>
           {!data || !assets ? (
-            <div className="muted" style={{ height: size }}>Загрузка раунда…</div>
+            <div className="muted" style={{ height: size }}>{t("replay.loadingRound")}</div>
           ) : (
             <div
               style={{ position: "relative", width, height: size, cursor: hover ? "pointer" : undefined }}
@@ -354,25 +241,31 @@ export function ReplayView({ match, round, at }: { match: MatchOverview; round: 
         <>
           <Timeline r={data} tick={uiTick} onSeek={seek} />
           <div className="controls">
-            <button onClick={() => stepFrame(-1)} title="Кадр назад (←)">⏮</button>
-            <button className="play" onClick={() => setPlaying((p) => !p)} title="Пробел">{playing ? "⏸" : "▶"}</button>
-            <button onClick={() => stepFrame(1)} title="Кадр вперёд (→)">⏭</button>
-            <button onClick={() => jumpKill(-1)} title="Предыдущее убийство (P)">⟨ убийство</button>
-            <button onClick={() => jumpKill(1)} title="Следующее убийство (N)">убийство ⟩</button>
+            <button onClick={() => stepFrame(-1)} title={t("replay.prevFrame")}>⏮</button>
+            <button className="play" onClick={() => setPlaying((p) => !p)} title={t("replay.space")}>{playing ? "⏸" : "▶"}</button>
+            <button onClick={() => stepFrame(1)} title={t("replay.nextFrame")}>⏭</button>
+            <button onClick={() => jumpKill(-1)} title={t("replay.prevKill")}>{t("replay.killPrev")}</button>
+            <button onClick={() => jumpKill(1)} title={t("replay.nextKill")}>{t("replay.killNext")}</button>
             <span className="seg">
               {SPEEDS.map((s) => (
                 <button key={s} className={speed === s ? "on" : ""} onClick={() => setSpeed(s)}>{s}×</button>
               ))}
             </span>
+            <button
+              title={t("replay.addHighlightTitle")}
+              onClick={() => go("match", match.id, "highlights", round, Math.round((tickRef.current - data.freeze_end_tick) / data.tick_rate))}
+            >
+              {t("replay.addHighlight")}
+            </button>
             <span className="muted small hotkeys">
-              Пробел — пуск/пауза · ←/→ — кадр · Shift+←/→ — 5 с · ↑/↓ — скорость · N/P — убийства · [ ] — раунды · Home — конец фризтайма
-              {assets && assets.meta.levels.length > 1 ? " · 1/2/3 — уровни" : ""}
+              {t("replay.hotkeys")}
+              {assets && assets.meta.levels.length > 1 ? t("replay.hotkeysLevels") : ""}
             </span>
           </div>
           {roundInfo && (
             <div className="muted small">
-              Победа: {roundInfo.winner} ({sideShort(roundInfo.winner_side)}), {REASONS[roundInfo.reason] ?? roundInfo.reason}
-              {roundInfo.plant_site ? `, плант на ${roundInfo.plant_site}` : ""}.
+              {t("replay.won", { winner: roundInfo.winner, side: sideShort(roundInfo.winner_side), reason: reasonLabel(roundInfo.reason) })}
+              {roundInfo.plant_site ? t("replay.plantOn", { site: roundInfo.plant_site }) : ""}.
             </div>
           )}
         </>
@@ -383,12 +276,12 @@ export function ReplayView({ match, round, at }: { match: MatchOverview; round: 
 
 function Clock({ r, tick }: { r: Replay; tick: number }) {
   const bomb = bombState(r, tick);
-  if (tick < r.freeze_end_tick) return <span className="clock">фризтайм {fmtClock((r.freeze_end_tick - tick) / r.tick_rate)}</span>;
+  if (tick < r.freeze_end_tick) return <span className="clock">{t("clock.freeze", { t: fmtClock((r.freeze_end_tick - tick) / r.tick_rate) })}</span>;
   if (bomb.planted && !bomb.defused) {
     const left = BOMB_TIME - (tick - bomb.planted.tick) / r.tick_rate;
     return <span className="clock bomb">💣 {bomb.planted.site} {fmtClock(left)}</span>;
   }
-  if (bomb.defused) return <span className="clock defused">разминирована</span>;
+  if (bomb.defused) return <span className="clock defused">{t("replay.defused")}</span>;
   return <span className="clock">{fmtClock(ROUND_TIME - (tick - r.freeze_end_tick) / r.tick_rate)}</span>;
 }
 
@@ -401,9 +294,9 @@ function TeamPanel({ states, title, color }: { states: PlayerState[]; title: str
           <div className="pl-top">
             <span className="pl-name">{s.p.name}</span>
             <span className="pl-icons">
-              {s.bomb && <span title="бомба">💣</span>}
-              {s.kit && <span title="дефьюз-кит">✂</span>}
-              {s.armor > 0 && <span title={`броня ${s.armor}`}>{s.helmet ? "⛑" : "🛡"}</span>}
+              {s.bomb && <span title={t("pl.bomb")}>💣</span>}
+              {s.kit && <span title={t("pl.kit")}>✂</span>}
+              {s.armor > 0 && <span title={t("pl.armor", { n: s.armor })}>{s.helmet ? "⛑" : "🛡"}</span>}
             </span>
           </div>
           <div className="hp"><div style={{ width: `${s.hp}%`, background: color }} /><span>{s.hp}</span></div>
@@ -468,9 +361,9 @@ function Timeline({ r, tick, onSeek }: { r: Replay; tick: number; onSeek: (t: nu
         window.addEventListener("mouseup", up);
       }}
     >
-      <div className="tl-freeze" style={{ width: pct(r.freeze_end_tick) }} title="фризтайм" />
+      <div className="tl-freeze" style={{ width: pct(r.freeze_end_tick) }} title={t("tl.freeze")} />
       <div className="tl-progress" style={{ width: pct(tick) }} />
-      <div className="tl-mark end" style={{ left: pct(r.end_tick) }} title="конец раунда" />
+      <div className="tl-mark end" style={{ left: pct(r.end_tick) }} title={t("tl.end")} />
       {r.kills.map((k, i) => (
         <div
           key={i}
@@ -480,7 +373,7 @@ function Timeline({ r, tick, onSeek }: { r: Replay; tick: number; onSeek: (t: nu
         />
       ))}
       {r.bomb.filter((b) => b.event === "finish_plant" || b.event === "defuse").map((b, i) => (
-        <div key={i} className="tl-bomb" style={{ left: pct(b.tick) }} title={b.event === "defuse" ? "дефьюз" : `плант ${b.site}`}>
+        <div key={i} className="tl-bomb" style={{ left: pct(b.tick) }} title={b.event === "defuse" ? t("tl.defuse") : t("tl.plant", { site: b.site })}>
           {b.event === "defuse" ? "✂" : "💣"}
         </div>
       ))}

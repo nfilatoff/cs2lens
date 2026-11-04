@@ -1,23 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type LibraryMatch, type Tables } from "../api";
 import { DataTable } from "../components/DataTable";
+import { t, td } from "../i18n";
 
-const SECTIONS: [string, string][] = [
-  ["matches", "Матчи"],
-  ["summary", "Команды: всего"],
-  ["summary_by_map", "Команды по картам"],
-  ["by_side", "По сторонам"],
-  ["by_side_map", "По картам и сторонам"],
-  ["opening", "Опенинги"],
-  ["trades", "Трейды"],
-  ["bomb_t", "T: планты"],
-  ["bomb_ct", "CT: ретейки и дефьюзы"],
-  ["executes", "Экзекуты T по картам и сайтам"],
-  ["rotations", "Ротации CT"],
-  ["setups", "Сетапы CT"],
-  ["win_reasons", "Как выигрывались раунды"],
-  ["by_buy", "По закупам"],
-  ["players", "Игроки (по ADR)"],
+// in this order; titles are agg.s.<name> in the locales
+const SECTIONS = [
+  "matches", "summary", "summary_by_map", "by_side", "by_side_map", "opening", "trades", "bomb_t", "bomb_ct",
+  "executes", "rotations", "setups", "win_reasons", "by_buy", "players",
 ];
 
 export function AggregatePage() {
@@ -67,13 +56,13 @@ export function AggregatePage() {
 
   return (
     <div className="page">
-      <div className="pagehead"><h1>Несколько матчей</h1><div className="sub">Суммарная статистика команд и игроков по выбранным матчам</div></div>
+      <div className="pagehead"><h1>{t("agg.title")}</h1><div className="sub">{t("agg.sub")}</div></div>
       <div className="grid2">
         <div>
-          <h3>Матчи</h3>
+          <h3>{t("agg.matches")}</h3>
           <div className="row small">
-            <button className="link" onClick={() => setPicked(new Set(matches.map((m) => m.id)))}>выбрать все</button>
-            <button className="link" onClick={() => setPicked(new Set())}>снять</button>
+            <button className="link" onClick={() => setPicked(new Set(matches.map((m) => m.id)))}>{t("agg.selectAll")}</button>
+            <button className="link" onClick={() => setPicked(new Set())}>{t("agg.clear")}</button>
           </div>
           <div className="pick-list">
             {matches.map((m) => (
@@ -86,12 +75,12 @@ export function AggregatePage() {
           </div>
         </div>
         <div>
-          <h3>Алиасы команд</h3>
-          <div className="muted small">Одна строка — одна замена: СТАРОЕ=НОВОЕ. Так склеиваются разные названия одной команды.</div>
+          <h3>{t("agg.aliases")}</h3>
+          <div className="muted small">{t("agg.aliasHint")}</div>
           <textarea rows={6} value={aliasText} onChange={(e) => setAliasText(e.target.value)} placeholder="team_dr1amwtf=Arena Pro Team" />
           {teams.length > 0 && (
             <div className="small muted">
-              Команды в выбранных матчах:{" "}
+              {t("agg.teamsIn")}{" "}
               {teams.map((t) => (
                 <button key={t} className="link" onClick={() => setAliasText((a) => (a ? a + "\n" : "") + `${t}=`)}>
                   {t}
@@ -101,7 +90,7 @@ export function AggregatePage() {
           )}
           <div className="row">
             <button disabled={!picked.size || busy} onClick={run}>
-              {busy ? "Считаю…" : `Посчитать (${picked.size})`}
+              {busy ? t("agg.computing") : t("agg.compute", { n: picked.size })}
             </button>
           </div>
         </div>
@@ -110,8 +99,8 @@ export function AggregatePage() {
       {result && (
         <div>
           {result.warnings.map((w) => <div key={w} className="warn">{w}</div>)}
-          {SECTIONS.filter(([k]) => result.tables[k]).map(([k, title]) => (
-            <DataTable key={k} title={title} rows={result.tables[k]} maxHeight={k === "players" || k === "setups" ? 420 : undefined} />
+          {SECTIONS.filter((k) => result.tables[k]).map((k) => (
+            <DataTable key={k} title={td(`agg.s.${k}`, k)} rows={result.tables[k]} maxHeight={k === "players" || k === "setups" ? 420 : undefined} />
           ))}
         </div>
       )}

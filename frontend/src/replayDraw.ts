@@ -2,6 +2,7 @@
 // Drawing happens in radar pixels (1024 per radar); `s` is radar px per screen px, so
 // sizes written as `n * s` stay n screen pixels at any zoom.
 import { api, type Replay, type ReplayKill, type ReplayPlayer } from "./api";
+import { RADAR_SIZE, drawRadar, levelLabel, levelOf, sideColor, worldToPx, type MapAssets } from "./radar";
 
 export const SMOKE_RADIUS = 144; // world units
 export const FIRE_RADIUS = 110;
@@ -458,4 +459,128 @@ export function drawArea(ctx: Ctx, kind: "smoke" | "fire", x: number, y: number,
   ctx.arc(px, py, (kind === "smoke" ? SMOKE_RADIUS : FIRE_RADIUS) / scale, 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = 1;
+}
+
+// ---- a whole round frame, shared by the replay and the highlight clips ----
+export const ROUND_TIME = 115; // seconds of round clock after freeze time
+export const BOMB_TIME = 40;
+
+export interface RoundDrawOpts {
+  names: boolean;
+  weapons: boolean;
+  trails: boolean;
+  shots: boolean;
+  hoverKill: number; // index into r.kills, -1 for none
+  focus?: Set<string>; // players drawn with a ring and a bold name (highlights)
+  levelLabels?: boolean; // level names in the panel corner (default true)
+}
+
+/** One radar panel per entry of `levels`, `size` px each, side by side from x = 0. */
+export function drawRound(ctx: CanvasRenderingContext2D, assets: MapAssets, r: Replay, tick: number, levels: number[], size: number, opts: RoundDrawOpts) {
+  const { meta, images } = assets;
+  const states = playerStates(r, tick);
+  const bomb = bombState(r, tick);
+  const multi = meta.levels.length > 1;
+  const k = size / RADAR_SIZE; // screen px per radar px
+  const s = 1 / k; // radar px per screen px
+
+  levels.forEach((li, panel) => {
+    const ox = panel * size;
+    drawRadar(ctx, images[li], ox, size);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ox, 0, size, size);
+    ctx.clip();
+    ctx.translate(ox, 0);
+    ctx.scale(k, k);
+    const vis = (z: number | null | undefined) => (!multi || levelOf(meta, z) === li ? 1 : 0.15);
+    const P = (x: number, y: number) => worldToPx(meta, x, y);
+
+    // smokes and fires with their real lifetimes
+    for (const a of r.smokes) {
+      if (tick < a.start || tick > a.end) continue;
+      const fadeIn = Math.min(1, (tick - a.start) / r.tick_rate);
+      const fadeOut = Math.min(1, (a.end - tick) / (2 * r.tick_rate));
+      drawArea(ctx, "smoke", a.x, a.y, P, meta.scale, Math.min(fadeIn, fadeOut) * vis(a.z));
+      const [px, py] = P(a.x, a.y);
+      ctx.globalAlpha = vis(a.z);
+      ctx.fillStyle = "#222";
+      ctx.font = `${10 * s}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.fillText(String(Math.ceil((a.end - tick) / r.tick_rate)), px, py + 4 * s);
+      ctx.globalAlpha = 1;
+    }
+    for (const a of r.fires) {
+      if (tick >= a.start && tick <= a.end) drawArea(ctx, "fire", a.x, a.y, P, meta.scale, vis(a.z));
+    }
+
+    // grenades in flight, with the path so far
+    for (const g of r.grenades) {
+      if (tick < g.t[0] || tick > g.end + 0.25 * r.tick_rate) continue;
+      const z = g.z[frameAt(g.t, tick)[0]];
+      drawGrenade(ctx, g, tick, r.tick_rate, P, s, meta.scale, g.side ? sideColor(g.side) : NADE_COLORS[g.type] ?? "#ccc", vis(z), opts.trails);
+    }
+
+    // death crosses; the hovered one is drawn last, with the killer and the line of fire
+    r.kills.forEach((kill, i) => {
+      if (kill.tick <= tick && i !== opts.hoverKill) drawKillMark(ctx, kill, P, s, sideColor(kill.victim_side), 0.9 * vis(kill.vz));
+    });
+
+    // bomb on the ground or planted
+    const b = bomb.planted ?? bomb.dropped;
+    if (b) {
+      const [px, py] = P(b.x, b.y);
+      const blink = bomb.planted && !bomb.defused ? 0.5 + 0.5 * Math.sin(tick / 6) : 1;
+      ctx.globalAlpha = vis(b.z) * blink;
+      ctx.fillStyle = bomb.defused ? "#3ddc84" : "#ff3030";
+      ctx.fillRect(px - 5 * s, py - 4 * s, 10 * s, 8 * s);
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 1 * s;
+      ctx.strokeRect(px - 5 * s, py - 4 * s, 10 * s, 8 * s);
+      ctx.globalAlpha = 1;
+    }
+
+    // bullet tracers: to the player hit, or a fading ray along the view direction
+    const zOf = new Map(states.map((st) => [st.p.steamid, st.z]));
+    const sideOf = new Map(states.map((st) => [st.p.steamid, st.p.side]));
+    if (opts.shots) {
+      drawShots(ctx, r, tick, P, s, meta.scale, (id) => vis(zOf.get(id)) === 1, (id) => sideColor(sideOf.get(id)));
+    }
+    const shooting = new Set<string>();
+    for (let q = r.shots.tick.length - 1; q >= 0 && r.shots.tick[q] >= tick - 3; q--) {
+      if (r.shots.tick[q] <= tick) shooting.add(r.shots.player[q]);
+    }
+
+    // players; the focused ones last, on top, with a pulsing ring
+    const focused = (st: PlayerState) => !!opts.focus?.has(st.p.steamid);
+    for (const st of [...states.filter((x) => !focused(x)), ...states.filter(focused)]) {
+      if (st.hp <= 0 || Number.isNaN(st.x)) continue;
+      const [px, py] = P(st.x, st.y);
+      if (focused(st)) {
+        ctx.globalAlpha = vis(st.z);
+        ctx.strokeStyle = "#ff5500";
+        ctx.lineWidth = 2.5 * s;
+        ctx.beginPath();
+        ctx.arc(px, py, (12 + 2 * Math.sin(tick / 8)) * s, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      drawPlayer(ctx, st, px, py, s, tick, {
+        color: sideColor(st.p.side), alpha: vis(st.z), label: opts.names || focused(st) ? st.p.name : null,
+        weapon: opts.weapons || focused(st), cone: true, shooting: shooting.has(st.p.steamid),
+      });
+    }
+    if (opts.hoverKill >= 0) {
+      const kill = r.kills[opts.hoverKill];
+      drawKillMark(ctx, kill, P, s, sideColor(kill.victim_side), vis(kill.vz) === 1 ? 1 : 0.4, true);
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    if (multi && opts.levelLabels !== false) {
+      ctx.fillStyle = "#fff";
+      ctx.font = "13px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(levelLabel(meta, li), ox + 10, 20);
+    }
+  });
 }

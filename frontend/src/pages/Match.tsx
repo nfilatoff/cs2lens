@@ -6,27 +6,23 @@ import { ReplayView } from "../components/Replay";
 import { MapsView } from "../components/MapsView";
 import { ClipView } from "../components/ClipView";
 import { LineupsView } from "../components/LineupsView";
+import { HighlightsView } from "../components/HighlightsView";
 import { sideColor, sideShort } from "../radar";
+import { t, td, type Key } from "../i18n";
 
-const TABS: [string, string][] = [
-  ["overview", "Обзор"],
-  ["players", "Игроки"],
-  ["tactics", "Тактика"],
-  ["replay", "2D-реплей"],
-  ["maps", "Карты"],
-  ["lineups", "Гранаты и лайнапы"],
-  ["clip", "Клип (GIF/видео)"],
+const TABS: [string, Key][] = [
+  ["overview", "tab.overview"],
+  ["players", "tab.players"],
+  ["tactics", "tab.tactics"],
+  ["replay", "tab.replay"],
+  ["maps", "tab.maps"],
+  ["lineups", "tab.lineups"],
+  ["clip", "tab.clip"],
+  ["highlights", "tab.highlights"],
 ];
 
-export const REASONS: Record<string, string> = {
-  target_bombed: "взрыв бомбы",
-  bomb_defused: "разминирование",
-  ct_win: "все T убиты",
-  terrorists_win: "все CT убиты",
-  target_saved: "время вышло",
-  terrorists_surrender: "сдача T",
-  cts_surrender: "сдача CT",
-};
+/** How a round ended, in words. */
+export const reasonLabel = (reason: string) => td(`reason.${reason}`, reason);
 const REASON_ICON: Record<string, string> = { target_bombed: "💥", bomb_defused: "✂", target_saved: "⏱" };
 
 const scoreClass = (mine: number, other: number) => (mine > other ? "win" : mine < other ? "lose" : "");
@@ -40,17 +36,17 @@ export function MatchPage({ id, tab, round, at }: { id: string; tab: string; rou
   }, [id]);
 
   if (error) return <div className="page error">{error}</div>;
-  if (!match) return <div className="page">Загрузка матча…</div>;
+  if (!match) return <div className="page">{t("match.loading")}</div>;
   const teams = Object.entries(match.score);
 
   return (
     <div className="page">
       <div className="mhero" style={{ backgroundImage: `url(${radarUrl(match.map)})` }}>
         <div className="crumbs">
-          <a href="#/">Библиотека</a>
+          <a href="#/">{t("nav.library")}</a>
           <span>/</span>
           <span className="match-map">{match.map.replace(/^de_/, "")}</span>
-          <span className="pill">{match.timeline.length} раундов</span>
+          <span className="pill">{t("match.rounds", { n: match.timeline.length })}</span>
         </div>
         <div className="mhero-main">
           {teams.length === 2 ? (
@@ -72,7 +68,7 @@ export function MatchPage({ id, tab, round, at }: { id: string; tab: string; rou
       <div className="tabs">
         {TABS.map(([key, label]) => (
           <a key={key} href={`#/match/${encodeURIComponent(id)}/${key}`} className={tab === key ? "active" : ""}>
-            {label}
+            {t(label)}
           </a>
         ))}
       </div>
@@ -90,6 +86,7 @@ export function MatchPage({ id, tab, round, at }: { id: string; tab: string; rou
       {tab === "maps" && <MapsView match={match} />}
       {tab === "lineups" && <LineupsView initial={match} />}
       {tab === "clip" && <ClipView initial={match} />}
+      {tab === "highlights" && <HighlightsView match={match} round={round} at={at} />}
     </div>
   );
 }
@@ -102,16 +99,16 @@ function RoundStrip({ match }: { match: MatchOverview }) {
         <div key={team} className="strip-row">
           <div className="strip-team">{team}</div>
           {match.timeline.map((r: TimelineRound) => {
-            const t = r.teams[team];
+            const tm = r.teams[team];
             const won = r.winner === team;
             return (
               <div
                 key={r.round}
                 className={`strip-cell ${won ? "won" : ""}`}
-                style={won ? { background: sideColor(t?.side) } : { borderColor: sideColor(t?.side) }}
-                title={`Раунд ${r.round}: ${t ? sideShort(t.side) : ""}, закуп ${t?.buy ?? "?"} (${t?.equip ?? "?"}$), убийств ${t?.kills ?? 0}` +
-                  (won ? `, победа — ${REASONS[r.reason] ?? r.reason}` : "") +
-                  (r.plant_site ? `, плант ${r.plant_site}` : "")}
+                style={won ? { background: sideColor(tm?.side) } : { borderColor: sideColor(tm?.side) }}
+                title={t("strip.title", { round: r.round, side: tm ? sideShort(tm.side) : "", buy: tm?.buy ?? "?", equip: tm?.equip ?? "?", kills: tm?.kills ?? 0 }) +
+                  (won ? t("strip.won", { reason: reasonLabel(r.reason) }) : "") +
+                  (r.plant_site ? t("strip.plant", { site: r.plant_site }) : "")}
                 onClick={() => go("match", match.id, "replay", r.round)}
               >
                 {won ? REASON_ICON[r.reason] ?? "" : ""}
@@ -121,7 +118,7 @@ function RoundStrip({ match }: { match: MatchOverview }) {
         </div>
       ))}
       <div className="strip-row">
-        <div className="strip-team muted small">раунд</div>
+        <div className="strip-team muted small">{t("strip.round")}</div>
         {match.timeline.map((r) => (
           <div key={r.round} className="strip-num">
             {r.round}
@@ -136,74 +133,74 @@ function Overview({ match }: { match: MatchOverview }) {
   const ts = match.team_stats;
   return (
     <div>
-      <h2>Ход матча</h2>
-      <div className="muted small">Клик по раунду открывает 2D-реплей. Цвет — сторона победителя.</div>
+      <h2>{t("overview.flow")}</h2>
+      <div className="muted small">{t("overview.hint")}</div>
       <RoundStrip match={match} />
       <DataTable
-        title="Раунды"
+        title={t("overview.rounds")}
         maxHeight={360}
         rows={match.timeline.map((r) => {
           const row: Record<string, string | number | boolean | null> = {
             round_num: r.round,
             winner: r.winner,
             side: r.winner_side,
-            reason: REASONS[r.reason] ?? r.reason,
+            reason: reasonLabel(r.reason),
             plant_site: r.plant_site,
             duration: r.duration,
           };
-          for (const [team, t] of Object.entries(r.teams)) {
-            row[`${team}: закуп`] = `${t.buy ?? ""} ${t.equip ?? ""}$`;
-            row[`${team}: убийства`] = t.kills;
+          for (const [team, tm] of Object.entries(r.teams)) {
+            row[t("overview.colBuy", { team })] = `${tm.buy ?? ""} ${tm.equip ?? ""}$`;
+            row[t("overview.colKills", { team })] = tm.kills;
           }
           return row;
         })}
         onRowClick={(r) => go("match", match.id, "replay", Number(r.round_num))}
       />
-      <DataTable title="Сводка" rows={ts.summary} />
+      <DataTable title={t("overview.summary")} rows={ts.summary} />
       <div className="grid2">
-        <DataTable title="По сторонам" rows={ts.by_side} />
-        <DataTable title="Опенинги" rows={ts.opening} />
-        <DataTable title="Трейды" rows={ts.trades} />
-        <DataTable title="Как выигрывались раунды" rows={ts.win_reasons} />
-        <DataTable title="T: планты" rows={ts.bomb_t} />
-        <DataTable title="CT: ретейки и дефьюзы" rows={ts.bomb_ct} />
+        <DataTable title={t("overview.bySide")} rows={ts.by_side} />
+        <DataTable title={t("overview.opening")} rows={ts.opening} />
+        <DataTable title={t("overview.trades")} rows={ts.trades} />
+        <DataTable title={t("overview.winReasons")} rows={ts.win_reasons} />
+        <DataTable title={t("overview.bombT")} rows={ts.bomb_t} />
+        <DataTable title={t("overview.bombCt")} rows={ts.bomb_ct} />
       </div>
-      <DataTable title="Раунды по закупам (свой vs соперника)" rows={ts.by_buy} />
+      <DataTable title={t("overview.byBuy")} rows={ts.by_buy} />
     </div>
   );
 }
 
 function Tactics({ id }: { id: string }) {
-  const [t, setT] = useState<TacticsResult | null>(null);
+  const [res, setRes] = useState<TacticsResult | null>(null);
   useEffect(() => {
-    api.tactics(id).then(setT).catch((e: Error) => setT({ tables: null, error: e.message, warnings: [] }));
+    api.tactics(id).then(setRes).catch((e: Error) => setRes({ tables: null, error: e.message, warnings: [] }));
   }, [id]);
-  if (!t) return <div>Считаю тактику…</div>;
+  if (!res) return <div>{t("tactics.loading")}</div>;
   return (
     <div>
-      {t.warnings.map((w) => (
+      {res.warnings.map((w) => (
         <div key={w} className="warn">
           {w}
         </div>
       ))}
-      {t.error && <div className="error">Тактика не посчитана: {t.error}</div>}
-      {t.tables && (
+      {res.error && <div className="error">{t("tactics.failed", { error: res.error })}</div>}
+      {res.tables && (
         <>
-          <DataTable title="Экзекуты T по сайтам" rows={t.tables.executes} />
+          <DataTable title={t("tactics.executes")} rows={res.tables.executes} />
           <DataTable
-            title="Раунды T: цель, темп, заход и пакет гранат"
-            rows={t.tables.rounds_t}
+            title={t("tactics.roundsT")}
+            rows={res.tables.rounds_t}
             columns={["team", "round_num", "target_site", "exec_sec", "plant_sec", "tempo", "package", "entry", "package_zones", "won"]}
             onRowClick={(r) => go("match", id, "replay", Number(r.round_num))}
           />
           <DataTable
-            title="Сетапы CT (сколько CT у A / B / в центре)"
-            rows={t.tables.setups}
+            title={t("tactics.setups")}
+            rows={res.tables.setups}
             columns={["team", "round_num", "setup", "plant_site", "buy", "won"]}
             maxHeight={400}
             onRowClick={(r) => go("match", id, "replay", Number(r.round_num))}
           />
-          <DataTable title="Ротации CT по сайту планта" rows={t.tables.rotations} />
+          <DataTable title={t("tactics.rotations")} rows={res.tables.rotations} />
         </>
       )}
     </div>

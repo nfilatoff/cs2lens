@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
+import { api } from "./api";
 import { LibraryPage } from "./pages/Library";
 import { MatchPage } from "./pages/Match";
 import { AggregatePage } from "./pages/Aggregate";
+import { HighlightsPage } from "./pages/Highlights";
 import { ClipView } from "./components/ClipView";
 import { LineupsView } from "./components/LineupsView";
-import { IconFilm, IconGrenade, IconLibrary, IconLogo, IconStats } from "./components/Icons";
+import { IconFilm, IconGrenade, IconLibrary, IconLogo, IconStar, IconStats } from "./components/Icons";
+import { LANGS, detectSystemLang, setLang, t, useLang, type Key, type Lang } from "./i18n";
 
-// Hash routes: #/ (library), #/match/<id>/<tab>[/<round>[/<seconds after freeze end>]], #/aggregate, #/clip, #/lineups
+// Hash routes: #/ (library), #/match/<id>/<tab>[/<round>[/<seconds after freeze end>]], #/aggregate, #/clip, #/lineups,
+// #/highlights[/<id>]
 function useHash(): string[] {
   const read = () => window.location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   const [parts, setParts] = useState(read);
@@ -24,11 +28,14 @@ export const go = (...parts: (string | number)[]) => {
 
 export function App() {
   const [page, ...rest] = useHash();
-  const nav: [string, string, typeof IconLibrary][] = [
-    ["", "Библиотека", IconLibrary],
-    ["aggregate", "Матчи", IconStats],
-    ["clip", "Клипы", IconFilm],
-    ["lineups", "Лайнапы", IconGrenade],
+  const lang = useLang();
+  useEffect(() => detectSystemLang(() => api.system().then((s) => s.locale)), []);
+  const nav: [string, Key, typeof IconLibrary][] = [
+    ["", "nav.library", IconLibrary],
+    ["aggregate", "nav.matches", IconStats],
+    ["clip", "nav.clips", IconFilm],
+    ["lineups", "nav.lineups", IconGrenade],
+    ["highlights", "nav.highlights", IconStar],
   ];
   const active = page === "match" ? "" : page ?? "";
   return (
@@ -41,38 +48,57 @@ export function App() {
           {nav.map(([key, label, Icon]) => (
             <a key={key} href={`#/${key}`} className={`navitem ${active === key ? "active" : ""}`}>
               <Icon />
-              {label}
+              {t(label)}
             </a>
           ))}
         </nav>
+        <LangSwitch lang={lang} />
       </aside>
       <div className="content">
         <header className="topbar">
           <a className="wordmark" href="#/">
             CS2<b>LENS</b>
-            <small>Анализатор демок</small>
+            <small>{t("app.tagline")}</small>
           </a>
         </header>
-        <main>
+        {/* Pages are remounted on a language change: canvases and memoized texts are drawn in the language */}
+        <main key={lang}>
           {page === "match" && rest[0] ? (
             <MatchPage id={rest[0]} tab={rest[1] ?? "overview"} round={rest[2] ? Number(rest[2]) : undefined} at={rest[3] ? Number(rest[3]) : undefined} />
           ) : page === "aggregate" ? (
             <AggregatePage />
           ) : page === "clip" ? (
             <div className="page">
-              <div className="pagehead"><h1>Клипы</h1><div className="sub">GIF и видео по игроку или команде из одной или нескольких демок</div></div>
+              <div className="pagehead"><h1>{t("clips.title")}</h1><div className="sub">{t("clips.sub")}</div></div>
               <ClipView />
             </div>
           ) : page === "lineups" ? (
             <div className="page">
-              <div className="pagehead"><h1>Лайнапы</h1><div className="sub">Все броски гранат по картам с выгрузкой и запуском в CS2</div></div>
+              <div className="pagehead"><h1>{t("lineups.title")}</h1><div className="sub">{t("lineups.sub")}</div></div>
               <LineupsView />
             </div>
+          ) : page === "highlights" ? (
+            <HighlightsPage id={rest[0]} />
           ) : (
             <LibraryPage />
           )}
         </main>
       </div>
     </div>
+  );
+}
+
+function LangSwitch({ lang }: { lang: Lang }) {
+  return (
+    <label className="lang" title={t("lang.label")}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z" />
+      </svg>
+      <span>{lang.toUpperCase()}</span>
+      {/* the native select is invisible on top of the label, so the narrow sidebar shows just the code */}
+      <select value={lang} aria-label={t("lang.label")} onChange={(e) => setLang(e.target.value as Lang)}>
+        {LANGS.map(([code, name]) => <option key={code} value={code}>{code.toUpperCase()} · {name}</option>)}
+      </select>
+    </label>
   );
 }

@@ -6,14 +6,19 @@ import { api, type CS2Status, type Lineup, type MatchOverview, type Throw, type 
 import { download } from "../clipExport";
 import { drawRadar, levelLabel, levelOf, sideColor, sideShort, useMapAssets, worldToPx, type MapAssets } from "../radar";
 import { MatchPicker } from "./MatchPicker";
+import { t, td } from "../i18n";
+import { ConsoleSetup } from "./ConsoleSetup";
 
-const TYPES: [string, string, string][] = [
-  ["smoke", "смоки", "#cfd3d6"], ["flashbang", "флешки", "#ffffff"], ["he", "HE", "#ffd23f"], ["molotov", "молотовы", "#ff5a1f"], ["decoy", "декои", "#8a949e"],
+// grenade type and colour; names are nades.<type> (plural) and nade.<type> in the locales
+const TYPES: [string, string][] = [
+  ["smoke", "#cfd3d6"], ["flashbang", "#ffffff"], ["he", "#ffd23f"], ["molotov", "#ff5a1f"], ["decoy", "#8a949e"],
 ];
-const TYPE_COLOR = Object.fromEntries(TYPES.map(([k, , c]) => [k, c]));
-const TYPE_NAME: Record<string, string> = { smoke: "смок", flashbang: "флешка", he: "HE", molotov: "молотов", decoy: "декой" };
+const TYPE_COLOR = Object.fromEntries(TYPES);
+const typeName = (type: string) => td(`nade.${type}`, type);
+const TECHS = ["stand", "walk", "run", "jump", "run_jump"];
+const techName = (tech: string) => td(`tech.${tech}`, tech);
+// labels inside CS2 (echo, practice configs) stay English: the game console has no Cyrillic font
 const TYPE_EN: Record<string, string> = { smoke: "smoke", flashbang: "flash", he: "HE", molotov: "molotov", decoy: "decoy" };
-const TECH: Record<string, string> = { stand: "стоя", walk: "шагом", run: "в беге", jump: "прыжок", run_jump: "бег + прыжок" };
 const TECH_EN: Record<string, string> = { stand: "stand", walk: "walk", run: "run", jump: "jumpthrow", run_jump: "run jumpthrow" };
 const SAME_SPOT = 64; // world units between throw positions of one lineup
 const SAME_LANDING = 160;
@@ -39,7 +44,7 @@ interface Group {
 const dist = (ax: number, ay: number, bx: number, by: number) => Math.hypot(ax - bx, ay - by);
 const yawDiff = (a: number, b: number) => Math.abs(((a - b + 540) % 360) - 180);
 const median = (v: number[]) => [...v].sort((a, b) => a - b)[Math.floor((v.length - 1) / 2)] ?? 0;
-const fmtSec = (s: number) => (s < 0 ? `фриз ${Math.round(-s)} с` : `${Math.round(s)} с`);
+const fmtSec = (s: number) => (s < 0 ? t("lu.freezeSec", { n: Math.round(-s) }) : t("common.sec", { n: Math.round(s) }));
 
 function groupThrows(throws: MatchThrow[]): Group[] {
   const groups: { type: string; throws: MatchThrow[] }[] = [];
@@ -284,21 +289,21 @@ export function LineupsView({ initial }: { initial?: MatchOverview }) {
       const r = await p;
       if (r.mode === "launch" && r.steam_url) {
         window.location.href = r.steam_url; // Steam asks to confirm the launch options
-        setNote(`CS2 не запущена: открываю через Steam. Подтвердите запуск — ${what} появится в игре, когда карта загрузится.`);
-      } else setNote(`Отправлено в CS2: ${what}.`);
+        setNote(t("lu.viaSteam", { what }));
+      } else setNote(t("lu.sent", { what }));
     } catch (e) {
       setError((e as Error).message);
     }
   };
 
   const copy = (text: string, what: string) =>
-    navigator.clipboard.writeText(text).then(() => setNote(`Скопировано: ${what}. Вставьте в консоль CS2 на своём сервере.`)).catch(() => setNote(text));
+    navigator.clipboard.writeText(text).then(() => setNote(t("lu.copied", { what }))).catch(() => setNote(text));
 
   const exportName = listName.trim() || `${map.replace(/^de_/, "")}_${player || team || "all"}`;
   const listCfg = async (install: boolean) => {
     try {
       const r = await api.cs2List(map, exportName, groups.map(lineupOf), install);
-      if (install) setNote(`Установлено: ${r.path}. В CS2 на своём сервере: ${r.exec}, затем ] / [ — следующий / предыдущий лайнап.`);
+      if (install) setNote(t("lu.installed", { path: r.path, exec: r.exec }));
       else download(new Blob([r.text], { type: "text/plain" }), r.file);
     } catch (e) {
       setError((e as Error).message);
@@ -309,57 +314,57 @@ export function LineupsView({ initial }: { initial?: MatchOverview }) {
   return (
     <div className="lineups">
       <div className="clip-side">
-        <h3>Демки</h3>
+        <h3>{t("common.demos")}</h3>
         <MatchPicker map={map} setMap={(m) => { setMap(m); setSelectedKey(null); }} ids={ids} setIds={setIds} onError={setError} />
 
-        <h3>Фильтры</h3>
+        <h3>{t("lu.filters")}</h3>
         <div className="row small">
-          {TYPES.map(([k, label, color]) => (
+          {TYPES.map(([k, color]) => (
             <label key={k} style={{ color }}>
-              <input type="checkbox" checked={types[k]} onChange={(e) => setTypes({ ...types, [k]: e.target.checked })} /> {label}
+              <input type="checkbox" checked={types[k]} onChange={(e) => setTypes({ ...types, [k]: e.target.checked })} /> {td(`nades.${k}`, k)}
             </label>
           ))}
         </div>
         <div className="row small">
           <select value={side} onChange={(e) => setSide(e.target.value)}>
-            <option value="">обе стороны</option>
+            <option value="">{t("common.bothSides")}</option>
             <option value="terrorist">T</option>
             <option value="counter-terrorist">CT</option>
           </select>
           <select value={team} onChange={(e) => { setTeam(e.target.value); setPlayer(""); }}>
-            <option value="">все команды</option>
-            {teams.map((t) => <option key={t}>{t}</option>)}
+            <option value="">{t("common.allTeams")}</option>
+            {teams.map((tm) => <option key={tm}>{tm}</option>)}
           </select>
           <select value={player} onChange={(e) => setPlayer(e.target.value)}>
-            <option value="">все игроки</option>
+            <option value="">{t("common.allPlayers")}</option>
             {players.map((p) => <option key={p}>{p}</option>)}
           </select>
           <select value={technique} onChange={(e) => setTechnique(e.target.value)}>
-            <option value="">любая техника</option>
-            {Object.entries(TECH).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            <option value="">{t("lu.anyTechnique")}</option>
+            {TECHS.map((k) => <option key={k} value={k}>{techName(k)}</option>)}
           </select>
           <select value={landZone} onChange={(e) => setLandZone(e.target.value)}>
-            <option value="">куда угодно</option>
+            <option value="">{t("lu.anywhere")}</option>
             {zones.map((z) => <option key={z}>{z}</option>)}
           </select>
           <label>
-            от <input type="number" min={1} max={20} value={minCount} onChange={(e) => setMinCount(Math.max(1, Number(e.target.value)))} /> бросков
+            {t("lu.atLeast")} <input type="number" min={1} max={20} value={minCount} onChange={(e) => setMinCount(Math.max(1, Number(e.target.value)))} /> {t("lu.throwsWord")}
           </label>
         </div>
-        <div className="muted small">{filtered.length} бросков → {groups.length} лайнапов</div>
+        <div className="muted small">{t("lu.counts", { n: filtered.length, g: groups.length })}</div>
 
-        <h3>Выгрузка</h3>
+        <h3>{t("lu.export")}</h3>
         <div className="row small">
-          <input placeholder={`имя списка (${exportName})`} value={listName} onChange={(e) => setListName(e.target.value)} />
+          <input placeholder={t("lu.listName", { name: exportName })} value={listName} onChange={(e) => setListName(e.target.value)} />
         </div>
         <div className="row small">
           <button onClick={() => download(new Blob([csv(filtered)], { type: "text/csv" }), `${exportName}_throws.csv`)} disabled={!filtered.length}>CSV</button>
           <button onClick={() => download(new Blob([JSON.stringify(jsonExport(map, filtered), null, 1)], { type: "application/json" }), `${exportName}_throws.json`)} disabled={!filtered.length}>JSON</button>
-          <button onClick={() => listCfg(false)} disabled={!groups.length} title="Практика-конфиг: ] / [ — следующий / предыдущий лайнап">.cfg</button>
-          <button onClick={() => listCfg(true)} disabled={!groups.length || !status?.cfg_dir}>Установить в CS2</button>
-          <button onClick={() => cs2(api.cs2RunList(map, exportName), `список ${exportName}`)} disabled={!groups.length || !status?.cfg_dir} title="Сначала «Установить в CS2»">Запустить список</button>
+          <button onClick={() => listCfg(false)} disabled={!groups.length} title={t("lu.cfgTitle")}>.cfg</button>
+          <button onClick={() => listCfg(true)} disabled={!groups.length || !status?.cfg_dir}>{t("lu.install")}</button>
+          <button onClick={() => cs2(api.cs2RunList(map, exportName), t("lu.listWhat", { name: exportName }))} disabled={!groups.length || !status?.cfg_dir} title={t("lu.runListTitle")}>{t("lu.runList")}</button>
         </div>
-        <div className="muted small">CSV и JSON — все отфильтрованные броски; .cfg — по одному броску на лайнап, перебор клавишами ] и [.</div>
+        <div className="muted small">{t("lu.exportHint")}</div>
 
         <CS2Panel status={status} show={showSettings} setShow={setShowSettings} onStatus={setStatus} onError={setError} />
         {note && <div className="small ok-text">{note}</div>}
@@ -368,8 +373,8 @@ export function LineupsView({ initial }: { initial?: MatchOverview }) {
 
       <div className="clip-main">
         {mapError2 ? <div className="error">{mapError2}</div> : !ids.length ? (
-          <div className="muted">Выберите одну или несколько демок карты.</div>
-        ) : !assets ? <div className="muted">Загрузка…</div> : (
+          <div className="muted">{t("common.pickDemos")}</div>
+        ) : !assets ? <div className="muted">{t("common.loading")}</div> : (
           <canvas
             ref={canvasRef}
             width={size * n * (window.devicePixelRatio || 1)}
@@ -381,29 +386,29 @@ export function LineupsView({ initial }: { initial?: MatchOverview }) {
         {selected && (
           <div className="lineup-card">
             <div className="lc-head">
-              <b style={{ color: TYPE_COLOR[selected.type] }}>{TYPE_NAME[selected.type]}</b> {selected.from} → {selected.to}
-              <span className="muted"> · {selected.throws.length} {selected.throws.length === 1 ? "бросок" : "бросков"}
-                {selected.technique ? ` · ${TECH[selected.technique]}` : ""} · {sideShort(selected.rep.side)}
-                · ~{fmtSec(median(selected.throws.map((t) => t.sec)))} после фризтайма</span>
+              <b style={{ color: TYPE_COLOR[selected.type] }}>{typeName(selected.type)}</b> {selected.from} → {selected.to}
+              <span className="muted"> · {t("lu.throws", { n: selected.throws.length })}
+                {selected.technique ? ` · ${techName(selected.technique)}` : ""} · {sideShort(selected.rep.side)}
+                {" · "}{t("lu.afterFreeze", { t: fmtSec(median(selected.throws.map((th) => th.sec))) })}</span>
             </div>
             <div className="row small">
-              <button className="primary" onClick={() => cs2(api.cs2Open(map, lineupOf(selected)), "лайнап")}>▶ Открыть в CS2</button>
-              <button onClick={() => copy(consoleString(lineupOf(selected)), "команда лайнапа")}>Копировать команду</button>
+              <button className="primary" onClick={() => cs2(api.cs2Open(map, lineupOf(selected)), t("lu.lineupWhat"))}>{t("lu.open")}</button>
+              <button onClick={() => copy(consoleString(lineupOf(selected)), t("lu.lineupCmd"))}>{t("lu.copy")}</button>
               <code className="console">{consoleString(lineupOf(selected))}</code>
             </div>
             <table className="lc-throws">
               <tbody>
-                {selected.throws.map((t) => (
-                  <tr key={`${t.matchId}-${t.id}`}>
-                    <td>{ids.length > 1 ? `M${t.matchNo} ` : ""}R{t.round_num}</td>
-                    <td>{fmtSec(t.sec)}</td>
-                    <td style={{ color: sideColor(t.side) }}>{t.name}</td>
-                    <td className="muted">{t.technique ? TECH[t.technique] : ""}</td>
-                    <td className="muted">{t.flight_sec !== null ? `${t.flight_sec.toFixed(1)} с до остановки` : ""}</td>
+                {selected.throws.map((th) => (
+                  <tr key={`${th.matchId}-${th.id}`}>
+                    <td>{ids.length > 1 ? `M${th.matchNo} ` : ""}R{th.round_num}</td>
+                    <td>{fmtSec(th.sec)}</td>
+                    <td style={{ color: sideColor(th.side) }}>{th.name}</td>
+                    <td className="muted">{th.technique ? techName(th.technique) : ""}</td>
+                    <td className="muted">{th.flight_sec !== null ? t("lu.flight", { n: th.flight_sec.toFixed(1) }) : ""}</td>
                     <td>
-                      <button className="link small" disabled={!t.playdemo} title={t.playdemo ? "Открыть демку в CS2 за 5 с до броска" : "Демка лежит вне папки CS2"}
-                        onClick={() => cs2(api.cs2Demo(t.matchId, Math.round(t.tick - 5 * t.tickRate), t.name), `демка, R${t.round_num}`)}>
-                        демка в CS2
+                      <button className="link small" disabled={!th.playdemo} title={th.playdemo ? t("lu.demoTitle") : t("lu.demoOutside")}
+                        onClick={() => cs2(api.cs2Demo(th.matchId, Math.round(th.tick - 5 * th.tickRate), th.name), t("lu.demoWhat", { round: th.round_num }))}>
+                        {t("lu.demoBtn")}
                       </button>
                     </td>
                   </tr>
@@ -415,20 +420,20 @@ export function LineupsView({ initial }: { initial?: MatchOverview }) {
         <div className="table-wrap" style={{ maxHeight: 420 }}>
           <table>
             <thead>
-              <tr><th>граната</th><th>откуда</th><th>куда</th><th>бросков</th><th>техника</th><th>когда</th><th>кто</th><th /></tr>
+              <tr><th>{t("lu.th.nade")}</th><th>{t("lu.th.from")}</th><th>{t("lu.th.to")}</th><th>{t("lu.th.count")}</th><th>{t("lu.th.tech")}</th><th>{t("lu.th.when")}</th><th>{t("lu.th.who")}</th><th /></tr>
             </thead>
             <tbody>
               {groups.slice(0, 300).map((g) => (
                 <tr key={g.key} className={`clickable ${g === selected ? "sel" : ""}`} onClick={() => setSelectedKey(g.key)}>
-                  <td style={{ color: TYPE_COLOR[g.type] }}>{TYPE_NAME[g.type]}</td>
+                  <td style={{ color: TYPE_COLOR[g.type] }}>{typeName(g.type)}</td>
                   <td>{g.from}</td>
                   <td>{g.to}</td>
                   <td className="num">{g.throws.length}</td>
-                  <td className="muted">{g.technique ? TECH[g.technique] : ""}</td>
-                  <td className="muted">{fmtSec(median(g.throws.map((t) => t.sec)))}</td>
-                  <td className="muted">{[...new Set(g.throws.map((t) => t.name))].slice(0, 3).join(", ")}</td>
+                  <td className="muted">{g.technique ? techName(g.technique) : ""}</td>
+                  <td className="muted">{fmtSec(median(g.throws.map((th) => th.sec)))}</td>
+                  <td className="muted">{[...new Set(g.throws.map((th) => th.name))].slice(0, 3).join(", ")}</td>
                   <td>
-                    <button className="link small" title="Открыть в CS2" onClick={(e) => { e.stopPropagation(); cs2(api.cs2Open(map, lineupOf(g)), "лайнап"); }}>▶ CS2</button>
+                    <button className="link small" title={t("lu.openTitle")} onClick={(e) => { e.stopPropagation(); cs2(api.cs2Open(map, lineupOf(g)), t("lu.lineupWhat")); }}>▶ CS2</button>
                   </td>
                 </tr>
               ))}
@@ -450,26 +455,27 @@ function CS2Panel({ status, show, setShow, onStatus, onError }: {
   return (
     <div className="cs2-panel small">
       <h3>CS2</h3>
-      <div>{status.game_dir ? <>папка игры: <span className="muted">{status.game_dir}</span></> : <span className="warn">папка CS2 не найдена — укажите её ниже</span>}</div>
+      <div>{status.game_dir ? <>{t("cs2.gameDir")} <span className="muted">{status.game_dir}</span></> : <span className="warn">{t("cs2.noDir")}</span>}</div>
       <div>
-        сетевая консоль (порт {status.port}):{" "}
-        {status.connected ? <span className="ok-text">подключена</span> : <span className="muted">нет — CS2 будет запущена через Steam</span>}
+        {t("cs2.netcon", { port: status.port })}{" "}
+        {status.connected ? <span className="ok-text">{t("cs2.connected")}</span> : <span className="muted">{t("cs2.notConnected")}</span>}
       </div>
-      {st.phase !== "idle" && <div className={st.phase === "error" ? "error" : st.phase === "done" ? "ok-text" : "warn"}>{st.message}</div>}
-      <button className="link small" onClick={() => setShow(!show)}>{show ? "скрыть" : "настройки и как это работает"}</button>
+      {!status.connected && (
+        <ConsoleSetup bindCommand={status.bind_command} running={status.running} onLinked={() => api.cs2().then(onStatus)} />
+      )}
+      {st.phase !== "idle" && (
+        <div className={st.phase === "error" ? "error" : st.phase === "done" ? "ok-text" : "warn"}>{td(`cs2.msg.${st.key}`, st.message, st.params)}</div>
+      )}
+      <button className="link small" onClick={() => setShow(!show)}>{show ? t("cs2.hide") : t("cs2.howto")}</button>
       {show && (
         <div>
           <p className="muted">
-            «Открыть в CS2» загружает карту на локальном сервере, включает sv_cheats и ставит вас на позицию броска
-            с нужным прицелом и гранатой в руке (setpos / setang / give). Если CS2 уже открыта с параметром запуска
-            <code> -netconport {status.port}</code> (Steam → CS2 → Свойства → Параметры запуска), команды уходят сразу.
-            Иначе браузер открывает Steam с этими параметрами — подтвердите запуск, лайнап придёт после загрузки карты.
-            Не нажимайте во время матча в матчмейкинге: смена карты отключит вас от игры.
+            {t("cs2.help1")} <code>-netconport {status.port}</code> {t("cs2.help2")}
           </p>
           <div className="row">
             <input placeholder={status.game_dir ?? "...\\Counter-Strike Global Offensive\\game\\csgo"} value={dir} onChange={(e) => setDir(e.target.value)} />
             <input type="number" placeholder={String(status.port)} value={port} onChange={(e) => setPort(e.target.value)} style={{ width: 80 }} />
-            <button onClick={() => api.cs2Settings(dir || null, port ? Number(port) : null).then(onStatus).catch((e: Error) => onError(e.message))}>Сохранить</button>
+            <button onClick={() => api.cs2Settings(dir || null, port ? Number(port) : null).then(onStatus).catch((e: Error) => onError(e.message))}>{t("common.save")}</button>
           </div>
         </div>
       )}

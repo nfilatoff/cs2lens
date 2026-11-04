@@ -1,24 +1,8 @@
 import { useMemo, useState } from "react";
 import type { Row } from "../api";
+import { t, td } from "../i18n";
 
-// Column headers in Russian; unknown columns are shown as-is.
-const LABELS: Record<string, string> = {
-  team: "команда", side: "сторона", rounds: "раунды", wins: "победы", win_pct: "% побед", rounds_won: "выиграно",
-  round_win_pct: "% раундов", kills: "убийства", deaths: "смерти", assists: "ассисты", kd: "K/D", adr: "ADR", kast: "KAST",
-  hs_pct: "HS %", headshots: "хедшоты", buy: "закуп", opp_buy: "закуп соперника", avg_equip: "ср. экип.",
-  avg_opp_equip: "ср. экип. соперника", reason_name: "причина", opening_kills: "первые убийства",
-  opening_deaths: "первые смерти", opening_win_pct: "% опенингов", trade_kills: "трейд-убийства", trade_kill_pct: "% трейдов",
-  traded_deaths: "отомщённые смерти", traded_death_pct: "% отомщённых", plants: "планты", plant_pct: "% плантов",
-  avg_plant_sec: "ср. время планта, с", target_site: "сайт", plant_site: "сайт планта", round_num: "раунд",
-  exec_sec: "старт экзекута, с", plant_sec: "плант, с", tempo: "темп", package: "пакет", won: "победа", entry: "заход",
-  package_zones: "куда легли гранаты", setup: "сетап", plants_faced: "плантов против", retake_wins: "ретейков выиграно",
-  retake_win_pct: "% ретейков", avg_rotators: "ср. ротирующих", avg_arrived: "ср. доехали", avg_before_plant: "ср. до планта",
-  avg_rot_sec: "ср. время ротации, с", name: "игрок", matches: "матчи", map: "карта", rounds_played: "раунды",
-  utility_damage: "урон гранатами", flashes_thrown: "флешек", enemies_flashed: "ослеплено врагов",
-  clutches_won: "клатчи выиграны", clutches_played: "клатчи сыграны", avg_exec_start_sec: "ср. старт экзекута, с",
-  smokes: "смоки", flashes: "флешки", mollies: "молотовы", hes: "HE", early: "ранние", mid: "средние", late: "поздние",
-  score: "счёт", winner: "победитель", duration: "длительность, с", reason: "причина", teams: "команды", match: "матч", t_rounds: "раундов за T", ct_rounds: "раундов за CT",
-};
+// Column headers come from the locales (col.<name>); unknown columns are shown as-is.
 
 const SIDES: Record<string, string> = { terrorist: "T", "counter-terrorist": "CT" };
 
@@ -56,7 +40,7 @@ export function DataTable({ rows, columns, title, maxHeight, onRowClick }: Props
     <div className="table-block">
       {title && <h3>{title}</h3>}
       {rows.length === 0 ? (
-        <div className="muted">нет данных</div>
+        <div className="muted">{t("table.noData")}</div>
       ) : (
         <div className="table-wrap" style={maxHeight ? { maxHeight } : undefined}>
           <table>
@@ -68,7 +52,7 @@ export function DataTable({ rows, columns, title, maxHeight, onRowClick }: Props
                     title={c}
                     onClick={() => setSort((s) => ({ col: c, desc: s?.col === c ? !s.desc : true }))}
                   >
-                    {LABELS[c] ?? c}
+                    {td(`col.${c}`, c)}
                     {sort?.col === c ? (sort.desc ? " ▾" : " ▴") : ""}
                   </th>
                 ))}

@@ -1,4 +1,5 @@
 // Typed client for the FastAPI backend (cs2lens/app/server.py).
+import { t, td } from "./i18n";
 
 export type Row = Record<string, string | number | boolean | null>;
 export type Tables = Record<string, Row[]>;
@@ -130,8 +131,65 @@ export interface CS2Status {
   cfg_dir: string | null;
   port: number;
   connected: boolean;
+  running: boolean;
+  bind_command: string;
   loaded: string | null;
-  state: { phase: "idle" | "launching" | "loading" | "done" | "error"; message: string; time: number };
+  // key and params name the message for translation (cs2.msg.<key>); message is its English text
+  state: { phase: "idle" | "launching" | "loading" | "done" | "error"; key?: string; params?: Record<string, string | number>; message: string; time: number };
+}
+
+export interface Highlight {
+  id: string;
+  kind: "ace" | "4k" | "3k" | "clutch" | "double" | "special" | "custom" | "kills";
+  round: number;
+  steamid: string | null; // the player in focus; null for a custom highlight of the whole map
+  start: number; // seconds after the freeze end
+  end: number;
+  // automatic highlights
+  name?: string;
+  team?: string | null;
+  side?: Side;
+  kills?: number;
+  headshots?: number;
+  weapons?: string[];
+  clutch?: number | null; // 1vN
+  won?: boolean;
+  tags?: string[];
+  score?: number;
+  kill_secs?: number[];
+  // custom highlights
+  title?: string;
+  created?: number;
+}
+
+export interface Recording {
+  file: string;
+  title: string;
+  kind: string;
+  round: number;
+  steamid: string | null;
+  seconds: number;
+  size: number;
+  created: number;
+}
+
+export interface RecorderStatus {
+  state: {
+    status: "idle" | "running" | "done" | "error" | "cancelled";
+    match_id?: string;
+    i: number;
+    n: number;
+    phase?: "connect" | "launch" | "loading" | "seek" | "record" | "finish" | "done" | "cancelled";
+    files: string[];
+    error: string | null;
+  };
+  ffmpeg: string | null;
+  encoder: string | null;
+  connected: boolean;
+  running: boolean;
+  bind_command: string;
+  hlae: string | null;
+  me: { steamid: string; name: string } | null;
 }
 
 export interface Lineup {
@@ -273,6 +331,9 @@ export interface Replay {
   shots: { tick: number[]; player: string[]; x: number[]; y: number[]; yaw: number[]; hx: (number | null)[]; hy: (number | null)[] };
 }
 
+/** A CS2 link error code from the backend ("cs2_no_ack") in words; other text as it is. */
+export const cs2Error = (code: string) => (code.startsWith("cs2_") ? td(`cs2.msg.${code.slice(4)}`, code) : code);
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
@@ -282,6 +343,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     } catch {
       /* not JSON */
     }
+    if (detail.startsWith("cs2_")) throw new Error(cs2Error(detail));
     throw new Error(`${res.status}: ${detail}`);
   }
   return res.json() as Promise<T>;
@@ -316,7 +378,7 @@ export const api = {
         if (xhr.status >= 200 && xhr.status < 300) resolve(body as { job: number | null; name: string });
         else reject(new Error(`${xhr.status}: ${body.detail ?? xhr.statusText}`));
       };
-      xhr.onerror = () => reject(new Error(`${file.name}: соединение прервано`));
+      xhr.onerror = () => reject(new Error(t("err.connection", { name: file.name })));
       xhr.send(file);
     }),
   deleteMatch: (id: string, demo: boolean) =>
@@ -331,6 +393,7 @@ export const api = {
     request<Movement>(`${m(id)}/movement?${new URLSearchParams(Object.entries(f).map(([k, v]) => [k, String(v)]))}`),
   throws: (id: string) => request<Throws>(`${m(id)}/throws`),
   cs2: () => request<CS2Status>("/api/cs2"),
+  cs2ConsoleTest: () => request<{ mode: "netcon" | "key" }>("/api/cs2/console-test", { method: "POST" }),
   cs2Settings: (game_dir: string | null, port: number | null) => request<CS2Status>("/api/cs2/settings", json({ game_dir, port })),
   cs2Open: (map: string, lineup: Lineup, reload = false) =>
     request<{ mode: "netcon" | "launch"; steam_url: string | null; cfg: string | null }>("/api/cs2/open", json({ map, lineup, reload })),
@@ -338,8 +401,24 @@ export const api = {
     request<{ text: string; file: string; exec: string; path: string | null }>("/api/cs2/list", json({ map, name, lineups, install })),
   cs2RunList: (map: string, name: string) =>
     request<{ mode: "netcon" | "launch"; steam_url: string | null }>("/api/cs2/run-list", json({ map, name })),
+  cs2Pov: (match_id: string, h: { round: number; start: number; end: number; steamid: string | null }, speed: number) =>
+    request<{ mode: "netcon" | "launch"; steam_url: string | null }>("/api/cs2/pov", json({ match_id, ...h, speed })),
   cs2Demo: (match_id: string, tick: number, player: string) =>
     request<{ mode: "netcon" | "launch"; steam_url: string | null }>("/api/cs2/demo", json({ match_id, tick, player })),
+  highlights: (id: string) => request<{ auto: Highlight[]; custom: Highlight[] }>(`${m(id)}/highlights`),
+  createHighlight: (id: string, h: { round: number; start: number; end: number; title: string; steamid: string | null }) =>
+    request<Highlight>(`${m(id)}/highlights`, json(h)),
+  deleteHighlight: (id: string, hid: string) => request<{ deleted: string }>(`${m(id)}/highlights/${encodeURIComponent(hid)}`, { method: "DELETE" }),
+  system: () => request<{ locale: string | null }>("/api/system"),
+  killClips: (id: string, steamid: string) => request<Highlight[]>(`${m(id)}/kills?steamid=${encodeURIComponent(steamid)}`),
+  recorder: () => request<RecorderStatus>("/api/recorder"),
+  recorderStart: (match_id: string, clips: { round: number; start: number; end: number; steamid: string | null; title: string; kind: string }[],
+    capture: "screen" | "window" | "hlae", fps: number, clean: boolean, close_game = false) =>
+    request<{ steam_url: string | null }>("/api/recorder/start", json({ match_id, clips, capture, fps, clean, close_game })),
+  hlaeInstall: () => request<{ version: string; path: string; sha256: string }>("/api/hlae/install", { method: "POST" }),
+  recorderCancel: () => request<RecorderStatus["state"]>("/api/recorder/cancel", { method: "POST" }),
+  recordings: (id: string) => request<Recording[]>(`${m(id)}/recordings`),
+  deleteRecording: (id: string, name: string) => request<{ deleted: string }>(`${m(id)}/recordings/${encodeURIComponent(name)}`, { method: "DELETE" }),
   replay: (id: string, round: number) => request<Replay>(`${m(id)}/rounds/${round}/replay`),
   mapMeta: (map: string) => request<MapMeta>(`/api/maps/${map}`),
   aggregate: (ids: string[], aliases: Record<string, string>) =>
@@ -347,3 +426,5 @@ export const api = {
 };
 
 export const radarUrl = (name: string) => `/api/radar/${name}.png`;
+export const recordingUrl = (id: string, name: string, download = false) =>
+  `${m(id)}/recordings/${encodeURIComponent(name)}${download ? "?download=true" : ""}`;

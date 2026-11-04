@@ -1,6 +1,7 @@
 // World <-> radar-pixel transform and radar image loading, shared by the replay and map views.
 import { useEffect, useState } from "react";
 import { api, radarUrl, type MapMeta } from "./api";
+import { t } from "./i18n";
 
 export const RADAR_SIZE = 1024;
 export const CT_COLOR = "#5aa9ff";
@@ -79,7 +80,7 @@ export function panelLevels(meta: MapMeta, view: number | "all"): number[] {
 
 export function levelLabel(meta: MapMeta, i: number): string {
   if (meta.levels.length === 1) return "";
-  return meta.levels[i].name === "lower" ? "нижний" : "верхний";
+  return meta.levels[i].name === "lower" ? t("level.lower") : t("level.upper");
 }
 
 /** Draw the radar background of one panel into a square of `size` px at (ox, 0). */
@@ -90,6 +91,6 @@ export function drawRadar(ctx: CanvasRenderingContext2D, img: HTMLImageElement |
   else {
     ctx.fillStyle = "#666";
     ctx.font = "14px sans-serif";
-    ctx.fillText("радар не найден в ~/.awpy", ox + 12, 24);
+    ctx.fillText(t("radar.missing"), ox + 12, 24);
   }
 }

@@ -3,6 +3,7 @@
 import { GIFEncoder, applyPalette, quantize } from "gifenc";
 import { ArrayBufferTarget, Muxer } from "mp4-muxer";
 import { strToU8, zipSync } from "fflate";
+import { t } from "./i18n";
 
 export type RenderFrame = (ctx: CanvasRenderingContext2D, time: number) => void;
 
@@ -31,7 +32,7 @@ function canvasFor(job: ExportJob): [HTMLCanvasElement, CanvasRenderingContext2D
 }
 
 function checkAbort(signal: AbortSignal) {
-  if (signal.aborted) throw new DOMException("отменено", "AbortError");
+  if (signal.aborted) throw new DOMException("aborted", "AbortError");
 }
 
 export async function exportGif(job: ExportJob): Promise<Blob> {
@@ -73,7 +74,7 @@ const CODECS: { codec: string; mux: "avc" | "vp9" | "av1" }[] = [
 export const canEncodeVideo = () => typeof VideoEncoder !== "undefined";
 
 export async function exportMp4(job: ExportJob): Promise<Blob> {
-  if (!canEncodeVideo()) throw new Error("браузер не поддерживает WebCodecs — выберите GIF или обновите браузер");
+  if (!canEncodeVideo()) throw new Error(t("err.webcodecs"));
   const bitrate = Math.round(Math.min(12e6, Math.max(2e6, job.width * job.height * job.fps * 0.12)));
   // Software encoders first: they are fast enough for these frame sizes and never stall
   // the way a busy or broken GPU encoder can.
@@ -89,7 +90,7 @@ export async function exportMp4(job: ExportJob): Promise<Blob> {
       }
     }
   }
-  if (!chosen) throw new Error("ни один видеокодек (H.264, VP9, AV1) не поддерживает такой размер — уменьшите размер");
+  if (!chosen) throw new Error(t("err.codec"));
 
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
@@ -134,6 +135,15 @@ export async function zipWith(mediaName: string, media: Blob, textName: string, 
     [textName]: strToU8("\ufeff" + text.replace(/\n/g, "\r\n")), // BOM and CRLF: opens cleanly in Notepad
   });
   return new Blob([zip as Uint8Array<ArrayBuffer>], { type: "application/zip" });
+}
+
+/** A zip of several files: media stored as is, text with a BOM and CRLF. */
+export async function zipFiles(files: [string, Blob | string][]): Promise<Blob> {
+  const entries: Record<string, Uint8Array | [Uint8Array, { level: 0 }]> = {};
+  for (const [name, data] of files) {
+    entries[name] = typeof data === "string" ? strToU8("\ufeff" + data.replace(/\n/g, "\r\n")) : [new Uint8Array(await data.arrayBuffer()), { level: 0 }];
+  }
+  return new Blob([zipSync(entries) as Uint8Array<ArrayBuffer>], { type: "application/zip" });
 }
 
 export function download(blob: Blob, name: string) {

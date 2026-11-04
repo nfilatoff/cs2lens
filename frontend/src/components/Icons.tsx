@@ -20,3 +20,6 @@ export const IconFilm = () => (
 export const IconGrenade = () => (
   <svg {...base}><circle cx="11" cy="14" r="6" /><path d="M11 8V5h4M15 5l3-2M9 14h4" /></svg>
 );
+export const IconStar = () => (
+  <svg {...base}><path d="M12 3l2.7 5.6 6.1.8-4.5 4.2 1.1 6-5.4-2.9-5.4 2.9 1.1-6-4.5-4.2 6.1-.8z" /></svg>
+);
