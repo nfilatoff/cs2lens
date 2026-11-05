@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type MatchOverview, type Movement, type Points, type Row } from "../api";
+import { api, type MatchOverview, type Movement, type MovementFilter, type Points, type Row } from "../api";
+import { go } from "../App";
+import { drawCallouts, useCallouts } from "../callouts";
 import { GRID, PALETTES, add, drawHeat, newGrid, type HeatOptions } from "../heat";
 import { drawRadar, levelLabel, levelOf, sideShort, useMapAssets, worldToPx, type MapAssets } from "../radar";
 import { t, td, type Key } from "../i18n";
+import { CalloutToggle } from "./CalloutToggle";
+import { SampleBadge } from "./SampleBadge";
 
 const NADE_COLORS: Record<string, string> = { smoke: "#d9d9d9", flash: "#fff35c", he: "#ff5c5c", molotov: "#ff9f1c" };
 
-type Source = "movement" | "kills" | "shots" | "damages" | "blinds" | "plants" | "utility";
+type Source = "movement" | "kills" | "shots" | "damages" | "blinds" | "plants" | "utility" | "zooms";
 
 // label and note of a mode are mode.<key> and mode.<key>.note in the locales
 interface ModeDef {
@@ -30,7 +34,10 @@ const MODES: ModeDef[] = [
   { key: "flashers", source: "blinds", role: "attacker", weight: (r) => Number(r.duration) || 0 },
   { key: "plants", source: "plants" },
   { key: "utility", source: "utility" },
+  { key: "zooms", source: "zooms" },
 ];
+
+const BUYS = ["pistol", "eco", "force", "full"];
 
 // [label: a locale key or null for "a–b s"], from, to
 const TIME_PRESETS: [Key | null, number, number][] = [
@@ -48,14 +55,36 @@ interface Filters {
   roundTo: number;
   tFrom: number;
   tTo: number;
+  buy: string;
+  oppBuy: string;
+  pistol: string; // "" | loss | win: the round right after that team's pistol round
+  man: string; // "" | up | even | down: more, as many or fewer players alive
 }
 
 /** Field of a row for the mode's role: attacker_x or victim_x, or x for rows of one actor. */
 const field = (mode: ModeDef, r: Row, name: string) => r[mode.role ? `${mode.role}_${name}` : name];
 
+/** A row's context is told from its actor (the attacker): the view of the victim turns it around. */
+function contextMatches(mode: ModeDef, r: Row, f: Filters): boolean {
+  const victim = mode.role === "victim";
+  const buy = victim ? r.opp_buy : r.buy, opp = victim ? r.buy : r.opp_buy;
+  if (f.buy && buy !== f.buy) return false;
+  if (f.oppBuy && opp !== f.oppBuy) return false;
+  if (f.pistol) {
+    if (r.after_pistol_loss === null || r.after_pistol_loss === undefined) return false;
+    if ((f.pistol === "loss") !== (victim ? !r.after_pistol_loss : !!r.after_pistol_loss)) return false;
+  }
+  if (f.man) {
+    if (r.man_diff === null || r.man_diff === undefined) return false;
+    const diff = (victim ? -1 : 1) * Number(r.man_diff);
+    if (f.man === "up" ? diff <= 0 : f.man === "down" ? diff >= 0 : diff !== 0) return false;
+  }
+  return true;
+}
+
 function selectRows(points: Points, mode: ModeDef, f: Filters, types: Record<string, boolean>): Row[] {
   if (mode.source === "movement") return [];
-  const rows = points[mode.source] as Row[];
+  const rows = (points[mode.source] ?? []) as Row[];
   return rows.filter((r) => {
     const round = r.round_num as number, sec = r.sec as number;
     if (round < f.roundFrom || round > f.roundTo || sec < f.tFrom || sec > f.tTo) return false;
@@ -65,12 +94,13 @@ function selectRows(points: Points, mode: ModeDef, f: Filters, types: Record<str
     if (f.player && field(mode, r, "name") !== f.player) return false;
     if (f.weapon && "weapon" in r && r.weapon !== f.weapon) return false;
     if (mode.source === "utility" && !types[r.type as string]) return false;
+    if (!contextMatches(mode, r, f)) return false;
     return field(mode, r, "x") !== null;
   });
 }
 
 interface View extends HeatOptions {
-  zones: boolean;
+  callouts: boolean;
   dots: boolean;
 }
 
@@ -125,61 +155,77 @@ function render(canvas: HTMLCanvasElement, assets: MapAssets, mode: ModeDef, row
       }
     }
 
-    if (v.zones) {
-      ctx.lineWidth = 1;
-      for (const z of meta.zones.filter((z) => meta.levels[li].name === z.level)) {
-        ctx.strokeStyle = "rgba(255,255,255,0.35)";
-        ctx.beginPath();
-        z.polygon.forEach(([x, y], i) => (i ? ctx.lineTo(...toPx(x, y)) : ctx.moveTo(...toPx(x, y))));
-        ctx.closePath();
-        ctx.stroke();
-      }
-      ctx.font = "10px sans-serif";
-      ctx.textAlign = "center";
-      const seen = new Set<string>();
-      for (const z of meta.zones.filter((z) => meta.levels[li].name === z.level)) {
-        if (seen.has(z.name)) continue;
-        seen.add(z.name);
-        const cx = z.polygon.reduce((a, p) => a + p[0], 0) / z.polygon.length;
-        const cy = z.polygon.reduce((a, p) => a + p[1], 0) / z.polygon.length;
-        const [px, py] = toPx(cx, cy);
-        ctx.fillStyle = "rgba(255,255,255,0.8)";
-        ctx.fillText(z.name, px, py);
-      }
-    }
+    if (v.callouts) drawCallouts(ctx, meta, li, ox, size);
     if (meta.levels.length > 1) {
       ctx.fillStyle = "#fff";
       ctx.font = "13px sans-serif";
       ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
       ctx.fillText(levelLabel(meta, li), ox + 10, 20);
     }
   });
 }
 
+/** What a heatmap shows: one match, or the rounds of a team over several matches. */
+export interface HeatSource {
+  key: string; // data is loaded again when this changes
+  map: string;
+  points: () => Promise<Points>;
+  movement: (f: MovementFilter) => Promise<Movement>;
+  teams: string[];
+  players: string[];
+  maxRound: number | null; // null: rounds of many matches, no round range
+  fixedTeam?: string; // the team is set outside: no team choice, and rows are its point of view
+  fixedBuy?: boolean; // the buy is set outside
+  matchId?: string; // for rows without their own match_id
+}
+
 export function MapsView({ match }: { match: MatchOverview }) {
-  const { assets, error: mapError } = useMapAssets(match.map);
+  const source = useMemo<HeatSource>(() => ({
+    key: match.id,
+    map: match.map,
+    points: () => api.points(match.id),
+    movement: (f) => api.movement(match.id, f),
+    teams: Object.keys(match.score),
+    players: [...new Set(match.players.map((p) => String(p.name)))].sort((a, b) => a.localeCompare(b)),
+    maxRound: match.timeline.length ? match.timeline[match.timeline.length - 1].round : 1,
+    matchId: match.id,
+  }), [match]);
+  return <HeatmapPanel source={source} />;
+}
+
+export function HeatmapPanel({ source }: { source: HeatSource }) {
+  const { assets, error: mapError } = useMapAssets(source.map);
   const [points, setPoints] = useState<Points | null>(null);
   const [movement, setMovement] = useState<Movement | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [modeKey, setModeKey] = useState("movement");
-  const maxRound = match.timeline.length ? match.timeline[match.timeline.length - 1].round : 1;
-  const [f, setF] = useState<Filters>({ team: "", side: "", player: "", weapon: "", roundFrom: 1, roundTo: maxRound, tFrom: 0, tTo: 300 });
+  const maxRound = source.maxRound ?? 999;
+  const [f, setF] = useState<Filters>({
+    team: source.fixedTeam ?? "", side: "", player: "", weapon: "", roundFrom: 1, roundTo: maxRound, tFrom: 0, tTo: 300, buy: "", oppBuy: "", pistol: "", man: "",
+  });
   const [types, setTypes] = useState<Record<string, boolean>>({ smoke: true, flash: true, he: true, molotov: true });
-  const [view, setView] = useState<View>({ radius: 7, palette: "inferno", opacity: 0.85, scale: "log", zones: false, dots: false });
+  const [view, setView] = useState<Omit<View, "callouts">>({ radius: 7, palette: "inferno", opacity: 0.85, scale: "log", dots: false });
+  const callouts = useCallouts();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mode = MODES.find((m) => m.key === modeKey)!;
   const set = (patch: Partial<Filters>) => setF((cur) => ({ ...cur, ...patch }));
 
   useEffect(() => {
-    api.points(match.id).then(setPoints).catch((e: Error) => setError(e.message));
-  }, [match.id]);
+    setPoints(null);
+    source.points().then(setPoints).catch((e: Error) => setError(e.message));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source.key]);
 
   // the movement density is binned on the server (hundreds of thousands of positions)
   useEffect(() => {
     if (mode.source !== "movement") return;
     let alive = true;
     const t = setTimeout(() => {
-      api.movement(match.id, { team: f.team, side: f.side, player: f.player, round_from: f.roundFrom, round_to: f.roundTo, t_from: f.tFrom, t_to: f.tTo })
+      source.movement({
+        team: f.team, side: f.side, player: f.player, round_from: f.roundFrom, round_to: f.roundTo, t_from: f.tFrom, t_to: f.tTo,
+        buy: f.buy, opp_buy: f.oppBuy, pistol: f.pistol, man: f.man,
+      })
         .then((mv) => alive && setMovement(mv))
         .catch((e: Error) => alive && setError(e.message));
     }, 150);
@@ -187,13 +233,13 @@ export function MapsView({ match }: { match: MatchOverview }) {
       alive = false;
       clearTimeout(t);
     };
-  }, [match.id, mode.source, f.team, f.side, f.player, f.roundFrom, f.roundTo, f.tFrom, f.tTo]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source.key, mode.source, f.team, f.side, f.player, f.roundFrom, f.roundTo, f.tFrom, f.tTo, f.buy, f.oppBuy, f.pistol, f.man]);
 
-  const teams = Object.keys(match.score);
-  const players = useMemo(() => [...new Set(match.players.map((p) => String(p.name)))].sort((a, b) => a.localeCompare(b)), [match.players]);
+  const { teams, players } = source;
   const weapons = useMemo(() => {
-    if (!points || !["kills", "shots", "damages"].includes(mode.source)) return [];
-    const rows = points[mode.source as "kills" | "shots" | "damages"];
+    if (!points || !["kills", "shots", "damages", "zooms"].includes(mode.source)) return [];
+    const rows = points[mode.source as "kills" | "shots" | "damages" | "zooms"] ?? [];
     const counts = new Map<string, number>();
     for (const r of rows) if (r.weapon) counts.set(String(r.weapon), (counts.get(String(r.weapon)) ?? 0) + 1);
     return [...counts].sort((a, b) => b[1] - a[1]).map(([w]) => w);
@@ -208,8 +254,8 @@ export function MapsView({ match }: { match: MatchOverview }) {
   const n = assets?.meta.levels.length ?? 1;
   const size = Math.min(760, Math.floor((window.innerWidth - 80) / n));
   useEffect(() => {
-    if (canvasRef.current && assets) render(canvasRef.current, assets, mode, rows, movement, size, view);
-  }, [assets, mode, rows, movement, size, view]);
+    if (canvasRef.current && assets) render(canvasRef.current, assets, mode, rows, movement, size, { ...view, callouts });
+  }, [assets, mode, rows, movement, size, view, callouts]);
 
   if (error || mapError) return <div className="error">{error ?? mapError}</div>;
   if (!points || !assets) return <div>{t("common.loading")}</div>;
@@ -217,6 +263,25 @@ export function MapsView({ match }: { match: MatchOverview }) {
   const count = mode.source === "movement"
     ? movement ? t("maps.playerMinutes", { n: Math.round(movement.player_seconds / 60) }) : "…"
     : t("maps.points", { n: rows.length });
+  // rounds behind what is on the map: a conclusion needs to show its sample
+  const roundsShown = mode.source === "movement" ? null : new Set(rows.map((r) => `${r.match_id ?? ""}:${r.round_num}`)).size;
+
+  // a click on a point of the map opens its round in the replay
+  const openNearest = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (mode.source === "movement") return;
+    const box = e.currentTarget.getBoundingClientRect();
+    const k = size / 1024, x = e.clientX - box.left, y = e.clientY - box.top;
+    const li = Math.floor(x / size);
+    let best: Row | null = null, bestD = 14 * 14;
+    for (const r of rows) {
+      if (assets.meta.levels.length > 1 && levelOf(assets.meta, field(mode, r, "z") as number) !== li) continue;
+      const [px, py] = worldToPx(assets.meta, field(mode, r, "x") as number, field(mode, r, "y") as number);
+      const d = (li * size + px * k - x) ** 2 + (py * k - y) ** 2;
+      if (d < bestD) [best, bestD] = [r, d];
+    }
+    const id = best && ((best.match_id as string | undefined) ?? source.matchId);
+    if (best && id) go("match", id, "replay", best.round_num as number, Math.max(0, Math.floor(best.sec as number) - 3));
+  };
 
   return (
     <div>
@@ -228,15 +293,19 @@ export function MapsView({ match }: { match: MatchOverview }) {
         </span>
       </div>
       <div className="filters">
-        <select value={f.team} onChange={(e) => set({ team: e.target.value })}>
-          <option value="">{t("common.allTeams")}</option>
-          {teams.map((tm) => <option key={tm}>{tm}</option>)}
-        </select>
-        <select value={f.side} onChange={(e) => set({ side: e.target.value })}>
-          <option value="">{t("common.bothSides")}</option>
-          <option value="terrorist">T</option>
-          <option value="counter-terrorist">CT</option>
-        </select>
+        {!source.fixedTeam && (
+          <>
+            <select value={f.team} onChange={(e) => set({ team: e.target.value })}>
+              <option value="">{t("common.allTeams")}</option>
+              {teams.map((tm) => <option key={tm}>{tm}</option>)}
+            </select>
+            <select value={f.side} onChange={(e) => set({ side: e.target.value })}>
+              <option value="">{t("common.bothSides")}</option>
+              <option value="terrorist">T</option>
+              <option value="counter-terrorist">CT</option>
+            </select>
+          </>
+        )}
         <select value={f.player} onChange={(e) => set({ player: e.target.value })}>
           <option value="">{t("common.allPlayers")}</option>
           {players.map((p) => <option key={p}>{p}</option>)}
@@ -247,11 +316,35 @@ export function MapsView({ match }: { match: MatchOverview }) {
             {weapons.map((w) => <option key={w}>{w}</option>)}
           </select>
         )}
-        <label className="small">
-          {t("maps.rounds")}{" "}
-          <input type="number" min={1} max={maxRound} value={f.roundFrom} onChange={(e) => set({ roundFrom: Number(e.target.value) })} />–
-          <input type="number" min={1} max={maxRound} value={f.roundTo} onChange={(e) => set({ roundTo: Number(e.target.value) })} />
-        </label>
+        {source.maxRound !== null && (
+          <label className="small">
+            {t("maps.rounds")}{" "}
+            <input type="number" min={1} max={maxRound} value={f.roundFrom} onChange={(e) => set({ roundFrom: Number(e.target.value) })} />–
+            <input type="number" min={1} max={maxRound} value={f.roundTo} onChange={(e) => set({ roundTo: Number(e.target.value) })} />
+          </label>
+        )}
+      </div>
+      <div className="filters">
+        {!source.fixedBuy && (
+          <select value={f.buy} onChange={(e) => set({ buy: e.target.value })} title={t("maps.buyTitle")}>
+            <option value="">{t("maps.anyBuy")}</option>
+            {BUYS.map((b) => <option key={b} value={b}>{td(`buy.${b}`, b)}</option>)}
+          </select>
+        )}
+        <select value={f.oppBuy} onChange={(e) => set({ oppBuy: e.target.value })} title={t("maps.oppBuyTitle")}>
+          <option value="">{t("maps.anyOppBuy")}</option>
+          {BUYS.map((b) => <option key={b} value={b}>{t("maps.oppBuy", { buy: td(`buy.${b}`, b) })}</option>)}
+        </select>
+        <select value={f.pistol} onChange={(e) => set({ pistol: e.target.value })}>
+          <option value="">{t("maps.anyPistol")}</option>
+          <option value="loss">{t("maps.afterPistolLoss")}</option>
+          <option value="win">{t("maps.afterPistolWin")}</option>
+        </select>
+        <span className="seg" title={t("maps.manTitle")}>
+          {([["", "maps.manAny"], ["up", "maps.manUp"], ["even", "maps.manEven"], ["down", "maps.manDown"]] as [string, Key][]).map(([v, label]) => (
+            <button key={v} className={f.man === v ? "on" : ""} onClick={() => set({ man: v })}>{t(label)}</button>
+          ))}
+        </span>
       </div>
       <div className="filters">
         <span className="small muted">{t("maps.roundTime")}</span>
@@ -292,11 +385,15 @@ export function MapsView({ match }: { match: MatchOverview }) {
         </div>
       )}
       <div className="filters small">
-        <label><input type="checkbox" checked={view.zones} onChange={(e) => setView({ ...view, zones: e.target.checked })} /> {t("maps.zones")}</label>
+        <CalloutToggle meta={assets.meta} />
         <span className="muted">{count}</span>
+        {roundsShown !== null && <SampleBadge rounds={roundsShown} />}
       </div>
       {mode.source === "utility" && points.utility_error && <div className="warn">{t("maps.nadesUnavailable", { error: points.utility_error })}</div>}
-      <canvas ref={canvasRef} width={size * n * dpr} height={size * dpr} style={{ width: size * n, height: size }} />
+      <canvas
+        ref={canvasRef} width={size * n * dpr} height={size * dpr} style={{ width: size * n, height: size, cursor: mode.source === "movement" ? undefined : "pointer" }}
+        onClick={openNearest} title={mode.source === "movement" ? undefined : t("maps.clickOpens")}
+      />
       <div className="muted small">
         {td(`mode.${mode.key}.note`, "")}
         {f.side ? t("maps.sideNote", { side: sideShort(f.side) }) : ""}

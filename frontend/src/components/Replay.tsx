@@ -6,7 +6,9 @@ import { CT_COLOR, RADAR_SIZE, T_COLOR, levelLabel, levelOf, panelLevels, sideCo
 import {
   BOMB_TIME, NADE_COLORS, ROUND_TIME, bombState, drawRound, fmtClock, frameAt, killAt, loadReplay, playerStates, weaponName, type PlayerState,
 } from "../replayDraw";
+import { useCallouts } from "../callouts";
 import { t } from "../i18n";
+import { CalloutToggle } from "./CalloutToggle";
 import { KillCard } from "./KillCard";
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
@@ -22,6 +24,7 @@ export function ReplayView({ match, round, at }: { match: MatchOverview; round: 
   const [speed, setSpeed] = useState(1);
   const [view, setView] = useState<number | "all">("all");
   const [opts, setOpts] = useState({ names: true, weapons: false, trails: true, shots: true });
+  const callouts = useCallouts();
   const [hover, setHover] = useState<{ kill: number; x: number; y: number } | null>(null);
   const [uiTick, setUiTick] = useState(0);
   const tickRef = useRef(0);
@@ -66,9 +69,9 @@ export function ReplayView({ match, round, at }: { match: MatchOverview; round: 
     const ctx = c.getContext("2d")!;
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    drawRound(ctx, assets, data, tickRef.current, levels, size, { ...opts, hoverKill: hover?.kill ?? -1 });
+    drawRound(ctx, assets, data, tickRef.current, levels, size, { ...opts, callouts, hoverKill: hover?.kill ?? -1 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assets, data, size, levels.join(","), opts, hover?.kill]);
+  }, [assets, data, size, levels.join(","), opts, callouts, hover?.kill]);
 
   useEffect(render, [render, uiTick]);
 
@@ -214,6 +217,7 @@ export function ReplayView({ match, round, at }: { match: MatchOverview; round: 
         <label className="small"><input type="checkbox" checked={opts.weapons} onChange={(e) => setOpts({ ...opts, weapons: e.target.checked })} /> {t("replay.weapons")}</label>
         <label className="small"><input type="checkbox" checked={opts.trails} onChange={(e) => setOpts({ ...opts, trails: e.target.checked })} /> {t("replay.trails")}</label>
         <label className="small"><input type="checkbox" checked={opts.shots} onChange={(e) => setOpts({ ...opts, shots: e.target.checked })} /> {t("replay.shots")}</label>
+        <CalloutToggle meta={assets?.meta} />
       </div>
 
       <div className="replay-body">

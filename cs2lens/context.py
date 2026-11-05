@@ -50,6 +50,75 @@ class Match:
         return pl.read_parquet(path) if path.exists() else None
 
 
+def alive_counts(m: Match) -> pl.DataFrame:
+    """Living players of each side per snapshot tick: ``tick``, ``alive_t``, ``alive_ct``."""
+    alive = (
+        m.data["snapshots"]
+        .select(pl.col("tick").cast(pl.Int32), "steamid", "side", "health")
+        .join(m.teams.select("steamid"), on="steamid")
+        .group_by("tick")
+        .agg(
+            alive_t=((pl.col("side") == "terrorist") & (pl.col("health") > 0)).sum().cast(pl.Int32),
+            alive_ct=((pl.col("side") == "counter-terrorist") & (pl.col("health") > 0)).sum().cast(pl.Int32),
+        )
+    )
+    return alive.sort("tick")
+
+
+def with_man_diff(df: pl.DataFrame, alive: pl.DataFrame, side_col: str = "side") -> pl.DataFrame:
+    """Add ``man_diff``: living players of the row's side minus the enemy's, at the last snapshot before its ``tick``."""
+    t_diff = pl.col("alive_t") - pl.col("alive_ct")
+    return (
+        df.with_columns(pl.col("tick").cast(pl.Int32))
+        .sort("tick")
+        .join_asof(alive, on="tick")
+        .with_columns(
+            man_diff=pl.when(pl.col(side_col) == "terrorist").then(t_diff)
+            .when(pl.col(side_col) == "counter-terrorist").then(-t_diff)
+            .otherwise(None)
+        )
+        .drop("alive_t", "alive_ct")
+    )
+
+
+def round_context(m: Match) -> pl.DataFrame:
+    """What a team walked into each round: one row per (round, team).
+
+    On top of ``Match.tr``: ``is_pistol``, ``prev_won``, ``loss_streak`` (losses in a row
+    before this round, reset at the half), ``after_pistol_loss`` (true after losing the
+    half's pistol round, false after winning it, null in every other round) and the
+    players alive at the plant (``alive_t_plant``, ``alive_ct_plant``; null without a
+    plant) and at the end of the round (``alive_t_end``, ``alive_ct_end``).
+    """
+    rows = m.tr.sort("team", "round_num").with_columns(is_pistol=(pl.col("buy") == "pistol").fill_null(False))
+    streaks = []
+    for _team, group in rows.group_by("team", maintain_order=True):
+        streak, side = 0, None
+        for r in group.iter_rows(named=True):
+            if r["side"] != side:
+                streak, side = 0, r["side"]
+            streaks.append(streak)
+            streak = 0 if r["won"] else streak + 1
+    ctx = rows.with_columns(
+        loss_streak=pl.Series(streaks, dtype=pl.Int32),
+        prev_won=pl.col("won").shift(1).over("team"),
+        after_pistol_loss=pl.when(pl.col("is_pistol").shift(1).over("team")).then(~pl.col("won").shift(1).over("team")).otherwise(None),
+    )
+
+    alive = alive_counts(m)
+    alive_at = lambda ticks, suffix: (  # noqa: E731
+        ticks.sort("tick").join_asof(alive, on="tick").select("round_num", **{f"alive_t_{suffix}": "alive_t", f"alive_ct_{suffix}": "alive_ct"})
+    )
+    plants = with_round(m.data["bomb"].filter(pl.col("event") == "finish_plant").select("tick"), m.rounds).select("round_num", "tick")
+    # one snapshot past the end: the last kill may fall between two snapshots
+    ends = m.rounds.select("round_num", tick=(pl.col("end_tick") + m.snap_step).cast(pl.Int32))
+    return (
+        ctx.join(alive_at(plants.unique("round_num"), "plant"), on="round_num", how="left")
+        .join(alive_at(ends, "end"), on="round_num", how="left")
+        .sort("round_num", "team")
+    )
+
+
 def load_match(directory: str | Path, extra_tables: tuple[str, ...] = ()) -> Match:
     directory = Path(directory)
     names = [*BASE_TABLES, *extra_tables]

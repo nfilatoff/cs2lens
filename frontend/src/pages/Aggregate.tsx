@@ -6,7 +6,7 @@ import { t, td } from "../i18n";
 // in this order; titles are agg.s.<name> in the locales
 const SECTIONS = [
   "matches", "summary", "summary_by_map", "by_side", "by_side_map", "opening", "trades", "bomb_t", "bomb_ct",
-  "executes", "rotations", "setups", "win_reasons", "by_buy", "players",
+  "executes", "executes_by_buy", "rotations", "setups", "win_reasons", "by_buy", "players",
 ];
 
 export function AggregatePage() {

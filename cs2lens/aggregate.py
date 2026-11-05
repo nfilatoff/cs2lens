@@ -92,6 +92,12 @@ SPECS: dict[str, Spec] = {
         wmeans={"avg_exec_start_sec": "rounds", "avg_plant_sec": "plants"},
         pcts=_WIN,
     ),
+    "executes_by_buy": Spec(
+        ["map", "team", "buy", "target_site"],
+        sums=["rounds", "wins", "plants"],
+        wmeans={"avg_exec_start_sec": "rounds", "avg_plant_sec": "plants"},
+        pcts=_WIN,
+    ),
     "rotations": Spec(
         ["map", "team", "plant_site"],
         sums=["plants_faced", "retake_wins"],
@@ -159,7 +165,7 @@ def aggregate(directories: list[str | Path], aliases: dict[str, str] | None = No
         except ValueError as e:
             warnings.warn(f"{directory.name}: tactics skipped ({e})", stacklevel=2)
         else:
-            for name in ("executes", "rotations"):
+            for name in ("executes", "executes_by_buy", "rotations"):
                 stacked.setdefault(name, []).append(tac[name].with_columns(match=pl.lit(label), map=pl.lit(m.map_name)))
             setups.append(tac["setups"].with_columns(match=pl.lit(label), map=pl.lit(m.map_name)))
 

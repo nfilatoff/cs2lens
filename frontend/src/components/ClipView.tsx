@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type MatchOverview, type Replay, type Side } from "../api";
 import { canEncodeVideo, download, exportGif, exportMp4, zipWith } from "../clipExport";
 import { buyLabel, clockOf, summarize, type ClipInfo, type Summary, type Track } from "../clipSummary";
+import { calloutsOn, drawCallouts } from "../callouts";
 import { t } from "../i18n";
 import {
   RADAR_SIZE, T_COLOR, drawRadar, levelLabel, levelOf, panelLevels, sideColor, sideShort, useMapAssets, worldToPx,
@@ -41,6 +42,7 @@ interface Layers {
   kills: boolean;
   others: boolean;
   grid: boolean;
+  callouts: boolean; // position names; a clip carries them into the exported video
 }
 
 interface Clip {
@@ -401,6 +403,7 @@ function drawFrame(ctx: C2D, assets: MapAssets, c: Clip, T: number, levels: numb
     ctx.rect(ox, 0, lay.map, lay.map);
     ctx.clip();
     ctx.translate(ox, 0);
+    if (c.layers.callouts) drawCallouts(ctx, assets.meta, li, 0, lay.map);
     drawMap(ctx, assets, c, active, li, lay.map);
     ctx.restore();
     if (assets.meta.levels.length > 1) {
@@ -557,22 +560,22 @@ interface RoundOption {
 const SIZES = [512, 768, 1024];
 
 // ---- component ----
-export function ClipView({ initial }: { initial?: MatchOverview }) {
-  const [map, setMap] = useState(initial?.map ?? "");
-  const [matchIds, setMatchIds] = useState<string[]>(initial ? [initial.id] : []);
+export function ClipView({ initial, scope }: { initial?: MatchOverview; scope?: { map: string; ids: string[]; side?: string; buy?: string } }) {
+  const [map, setMap] = useState(scope?.map ?? initial?.map ?? "");
+  const [matchIds, setMatchIds] = useState<string[]>(scope?.ids ?? (initial ? [initial.id] : []));
   const [overviews, setOverviews] = useState<Map<string, MatchOverview>>(new Map(initial ? [[initial.id, initial]] : []));
   const { assets, error: mapError } = useMapAssets(map || undefined);
 
   const [subject, setSubject] = useState<Subject | null>(null);
-  const [sideFilter, setSideFilter] = useState<Side | "">("terrorist");
+  const [sideFilter, setSideFilter] = useState<Side | "">((scope?.side as Side | undefined) || "terrorist");
   const [resultFilter, setResultFilter] = useState<"" | "won" | "lost">("");
-  const [buyFilter, setBuyFilter] = useState("");
+  const [buyFilter, setBuyFilter] = useState(scope?.buy ?? "");
   const [picked, setPicked] = useState<Set<string>>(new Set());
 
   const [layout, setLayout] = useState<Layout>("overlay");
   const [from, setFrom] = useState(0);
   const [to, setTo] = useState<number | null>(null);
-  const [layers, setLayers] = useState<Layers>({ trails: true, view: true, shots: true, nades: true, kills: true, others: false, grid: true });
+  const [layers, setLayers] = useState<Layers>({ trails: true, view: true, shots: true, nades: true, kills: true, others: false, grid: true, callouts: calloutsOn() });
   const [view, setView] = useState<number | "all">("all");
   const [replays, setReplays] = useState<Map<string, Replay>>(new Map());
   const [loaded, setLoaded] = useState(0);
@@ -886,7 +889,7 @@ export function ClipView({ initial }: { initial?: MatchOverview }) {
           <span className="muted">{t("clip.afterFreeze")}</span>
         </div>
         <div className="layers small">
-          {(["trails", "view", "shots", "nades", "kills", "others", "grid"] as const).map((key) => (
+          {(["trails", "view", "shots", "nades", "kills", "others", "grid", "callouts"] as const).map((key) => (
             <label key={key}>
               <input type="checkbox" checked={layers[key]} onChange={(e) => setLayers({ ...layers, [key]: e.target.checked })} /> {t(`clip.layer.${key}`)}
             </label>

@@ -2,6 +2,7 @@
 // Drawing happens in radar pixels (1024 per radar); `s` is radar px per screen px, so
 // sizes written as `n * s` stay n screen pixels at any zoom.
 import { api, type Replay, type ReplayKill, type ReplayPlayer } from "./api";
+import { drawCallouts } from "./callouts";
 import { RADAR_SIZE, drawRadar, levelLabel, levelOf, sideColor, worldToPx, type MapAssets } from "./radar";
 
 export const SMOKE_RADIUS = 144; // world units
@@ -473,6 +474,7 @@ export interface RoundDrawOpts {
   hoverKill: number; // index into r.kills, -1 for none
   focus?: Set<string>; // players drawn with a ring and a bold name (highlights)
   levelLabels?: boolean; // level names in the panel corner (default true)
+  callouts?: boolean; // position names over the radar, under everything else
 }
 
 /** One radar panel per entry of `levels`, `size` px each, side by side from x = 0. */
@@ -487,6 +489,7 @@ export function drawRound(ctx: CanvasRenderingContext2D, assets: MapAssets, r: R
   levels.forEach((li, panel) => {
     const ox = panel * size;
     drawRadar(ctx, images[li], ox, size);
+    if (opts.callouts) drawCallouts(ctx, meta, li, ox, size);
     ctx.save();
     ctx.beginPath();
     ctx.rect(ox, 0, size, size);

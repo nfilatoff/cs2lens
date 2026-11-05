@@ -30,12 +30,13 @@ from cs2lens.app.cs2 import BIND_COMMAND, CS2Bridge, NoConsole, game_running, st
 from cs2lens.app import hlae
 from cs2lens.app.recorder import Clip, Recorder, find_ffmpeg, load_index, pick_encoder, save_index
 from cs2lens.app.jobs import JobQueue
-from cs2lens.context import load_match, with_round
+from cs2lens.context import alive_counts, load_match, round_context, with_man_diff, with_round
 from cs2lens.extract import add_replay, extract
 from cs2lens.highlights import add_custom, delete_custom, highlights, kill_clips, load_custom
 from cs2lens.lineups import MAP_RE, PRACTICE, cfg_name, lineup_cfg, lineup_commands, list_cfg, safe_text, throws
-from cs2lens.maps import load_map_config
+from cs2lens.maps import available_maps, load_map_config
 from cs2lens.replay import round_payload
+from cs2lens.scout import MatchData, dossier, match_data, roster_suggestions, select_rounds, similar_rounds
 from cs2lens.tactics import tactics, userid_map, utility_events
 from cs2lens.team_stats import team_stats
 
@@ -117,6 +118,19 @@ class Library:
         if manifest.get("demo_path") and Path(manifest["demo_path"]).exists():
             return Path(manifest["demo_path"])
         return next((p for p in self.demos() if p.stem == d.name), None)
+
+    def extracts(self) -> list[Path]:
+        """Match extracts (an aggregate directory also has a manifest, but no demo header)."""
+        return [d for d in self.matches() if d.name != UPLOADS and "header" in json.loads((d / "manifest.json").read_text(encoding="utf-8"))]
+
+    def match_date(self, d: Path) -> float:
+        """When a match was played, as far as we can tell: demos have no date, so the demo file's time, else the extract's."""
+        demo = self.demo_for(d)
+        return demo.stat().st_mtime if demo else _stamp(d)
+
+    def aliases(self) -> dict[str, str]:
+        """Team names in demos -> the team they stand for."""
+        return self.settings().get("team_aliases", {})
 
     def owns_demo(self, path: Path) -> bool:
         """Only .dem files in the library folders (or uploads) may be deleted through the API."""
@@ -227,13 +241,49 @@ def _teams_for(df: pl.DataFrame, teams: pl.DataFrame, *roles: str) -> pl.DataFra
     return df
 
 
+CONTEXT_COLS = ("buy", "opp_buy", "after_pistol_loss", "man_diff")
+
+
+def _with_context(df: pl.DataFrame, ctx: pl.DataFrame, alive: pl.DataFrame, team_col: str, side_col: str) -> pl.DataFrame:
+    """Add ``CONTEXT_COLS`` to rows with ``tick`` and ``round_num``, from the point of view of ``team_col``."""
+    per_team = ctx.select("round_num", pl.col("team").alias(team_col), "buy", "opp_buy", "after_pistol_loss")
+    return with_man_diff(df, alive, side_col).join(per_team, on=["round_num", team_col], how="left")
+
+
+AWP_ZOOM_DEDUPE_SEC = 2.0  # zooming in twice and out again is one scope-up: keep the first event of a chain
+SCOPED_WEAPONS = ("awp", "ssg08")
+
+
+def _zooms(m, userids: pl.DataFrame, ctx: pl.DataFrame, alive: pl.DataFrame) -> pl.DataFrame:
+    """Where snipers scope up, from the ``weapon_zoom`` event; empty when the demo has no such event."""
+    ev = m.event("weapon_zoom")
+    if ev is None or ev.is_empty():
+        return pl.DataFrame()
+    z = with_round(ev.select("tick", pl.col("userid").cast(userids.schema["userid"])).join(userids, on="userid"), m.rounds)
+    snaps = m.data["snapshots"].select(pl.col("tick").cast(pl.Int32), "steamid", "name", "side", "x", "y", "z", "active_weapon", "health").sort("tick")
+    z = z.sort("tick").join_asof(snaps, on="tick", by="steamid", check_sortedness=False).filter(pl.col("active_weapon").is_in(SCOPED_WEAPONS) & (pl.col("health") > 0))
+    gap = int(AWP_ZOOM_DEDUPE_SEC * m.tick_rate)
+    z = z.sort("steamid", "tick").filter((pl.col("tick") - pl.col("tick").shift(1).over("steamid", "round_num")).fill_null(gap + 1) > gap)
+    z = _sec(z, m.tick_rate).join(m.teams, on="steamid")
+    return _with_context(z, ctx, alive, "team", "side").select(
+        "round_num", "sec", "name", "team", "side", weapon=pl.col("active_weapon"),
+        x=pl.col("x").round(0), y=pl.col("y").round(0), z=pl.col("z").round(0), *CONTEXT_COLS,
+    )
+
+
 @lru_cache(maxsize=64)
 def _points(d: Path, _stamp: float) -> dict:
-    """Event positions for the heatmaps: kills, utility, gun shots, damage, blinds, plants."""
+    """Event positions for the heatmaps: kills, utility, gun shots, damage, blinds, plants, sniper scopes.
+
+    Every row also has ``CONTEXT_COLS``, from the point of view of its actor (the attacker in
+    rows with two players): a view of the victim swaps the buys and negates the other two.
+    """
     m = load_match(d, extra_tables=("fires", "shots", "damages", "blinds"))
     rate = m.tick_rate
     names = m.data["players"].select("steamid", "name")
+    ctx, alive = round_context(m), alive_counts(m)
     kills = _sec(_teams_for(with_round(m.data["kills"], m.rounds), m.teams, "attacker", "victim"), rate)
+    kills = _with_context(kills, ctx, alive, "attacker_team", "attacker_side")
     # opening duel: the first kill between the two teams in each round
     kills = kills.with_columns(
         opening=(pl.col("tick") == pl.col("tick").filter(pl.col("attacker_team") != pl.col("victim_team")).min().over("round_num"))
@@ -242,58 +292,132 @@ def _points(d: Path, _stamp: float) -> dict:
     kills = kills.select(
         "round_num", "tick", "sec", "weapon", "headshot", "opening",
         "attacker_steamid", "attacker_name", "attacker_side", "attacker_team", "attacker_x", "attacker_y", "attacker_z",
-        "victim_steamid", "victim_name", "victim_side", "victim_team", "victim_x", "victim_y", "victim_z",
+        "victim_steamid", "victim_name", "victim_side", "victim_team", "victim_x", "victim_y", "victim_z", *CONTEXT_COLS,
     )
     shots = _sec(with_round(m.data["shots"], m.rounds), rate).with_columns(weapon=pl.col("weapon").str.replace("^weapon_", ""))
     shots = shots.filter(~pl.col("weapon").str.contains("knife|bayonet|grenade|flashbang|molotov|decoy|c4")).join(m.teams, on="steamid", how="left")
+    shots = _with_context(shots, ctx, alive, "team", "side")
     shots = shots.select("round_num", "sec", "steamid", "name", "side", "team", "weapon",
-                         x=pl.col("x").round(0), y=pl.col("y").round(0), z=pl.col("z").round(0))
-    dmg = _sec(_teams_for(with_round(m.data["damages"], m.rounds), m.teams, "attacker", "victim"), rate).select(
-        "round_num", "sec", "weapon", dmg=pl.col("dmg_health"),
+                         x=pl.col("x").round(0), y=pl.col("y").round(0), z=pl.col("z").round(0), *CONTEXT_COLS)
+    dmg = _with_context(_sec(_teams_for(with_round(m.data["damages"], m.rounds), m.teams, "attacker", "victim"), rate), ctx, alive, "attacker_team", "attacker_side").select(
+        "round_num", "sec", "weapon", *CONTEXT_COLS, dmg=pl.col("dmg_health"),
         attacker_name="attacker_name", attacker_side="attacker_side", attacker_team="attacker_team",
         attacker_x=pl.col("attacker_x").round(0), attacker_y=pl.col("attacker_y").round(0), attacker_z=pl.col("attacker_z").round(0),
         victim_name="victim_name", victim_side="victim_side", victim_team="victim_team",
         victim_x=pl.col("victim_x").round(0), victim_y=pl.col("victim_y").round(0), victim_z=pl.col("victim_z").round(0),
     )
-    blinds = _sec(_teams_for(with_round(m.data["blinds"], m.rounds), m.teams, "attacker", "victim"), rate).filter(
+    blinds = _with_context(_sec(_teams_for(with_round(m.data["blinds"], m.rounds), m.teams, "attacker", "victim"), rate).filter(
         pl.col("attacker_team") != pl.col("victim_team")
-    ).select(
-        "round_num", "sec", duration=pl.col("duration").round(2),
+    ), ctx, alive, "attacker_team", "attacker_side").select(
+        "round_num", "sec", *CONTEXT_COLS, duration=pl.col("duration").round(2),
         attacker_name="attacker_name", attacker_side="attacker_side", attacker_team="attacker_team",
         attacker_x=pl.col("attacker_x").round(0), attacker_y=pl.col("attacker_y").round(0), attacker_z=pl.col("attacker_z").round(0),
         victim_name="victim_name", victim_side="victim_side", victim_team="victim_team",
         victim_x=pl.col("victim_x").round(0), victim_y=pl.col("victim_y").round(0), victim_z=pl.col("victim_z").round(0),
     )
     plants = _sec(with_round(m.data["bomb"].filter(pl.col("event") == "finish_plant"), m.rounds), rate).join(m.teams, on="steamid", how="left")
-    plants = plants.select("round_num", "sec", "name", "team", site=pl.col("bombsite"), side=pl.lit("terrorist"),
+    plants = _with_context(plants.with_columns(side=pl.lit("terrorist")), ctx, alive, "team", "side")
+    plants = plants.select("round_num", "sec", "name", "team", "side", *CONTEXT_COLS, site=pl.col("bombsite"),
                            x=pl.col("x").round(0), y=pl.col("y").round(0), z=pl.col("z").round(0))
+    zooms = pl.DataFrame()
     try:
-        util = utility_events(m, userid_map(m)).join(names, on="steamid", how="left")
-        util = util.select("round_num", "tick", "sec", "type", "x", "y", "z", "steamid", "name", "team", "side")
+        userids = userid_map(m)
+        util = utility_events(m, userids).join(names, on="steamid", how="left")
+        util = _with_context(util, ctx, alive, "team", "side")
+        util = util.select("round_num", "tick", "sec", "type", "x", "y", "z", "steamid", "name", "team", "side", *CONTEXT_COLS)
         util_error = None
+        zooms = _zooms(m, userids, ctx, alive)
     except ValueError as e:
         util, util_error = pl.DataFrame(), str(e)
     return {"map": m.map_name, "kills": rows(kills), "utility": rows(util), "utility_error": util_error,
-            "shots": rows(shots), "damages": rows(dmg), "blinds": rows(blinds), "plants": rows(plants)}
+            "shots": rows(shots), "damages": rows(dmg), "blinds": rows(blinds), "plants": rows(plants), "zooms": rows(zooms)}
+
+
+@lru_cache(maxsize=64)
+def _match_data(d: Path, _stamp: float, date: float) -> MatchData:
+    return match_data(d, date)
+
+
+def _json_ready(v):
+    if isinstance(v, pl.DataFrame):
+        return rows(v)
+    if isinstance(v, dict):
+        return {k: _json_ready(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_json_ready(x) for x in v]
+    return v
+
+
+@lru_cache(maxsize=64)
+def _report(scope: tuple[tuple[Path, float, float], ...], team: str, aliases: tuple[tuple[str, str], ...], side: str, buy: str, rounds_last: int) -> dict:
+    """A dossier as JSON-ready data; ``scope`` is (directory, stamp, date), newest first."""
+    matches = [_match_data(*s) for s in scope]
+    return _json_ready(dossier(select_rounds(matches, team, dict(aliases), side, buy, rounds_last)))
+
+
+def _scouted_points(points: dict, selected: set[int], raw_names: set[str], aliases: dict[str, str], match_id: str) -> dict:
+    """A match's heatmap rows in the selected rounds that involve the team, marked with the match, under canonical names."""
+    two_sided = ("attacker_team", "victim_team")
+
+    def keep(r: dict, cols: tuple[str, ...]) -> dict | None:
+        if r["round_num"] not in selected or not any(r.get(c) in raw_names for c in cols):
+            return None
+        return r | {c: aliases.get(r[c], r[c]) for c in cols} | {"match_id": match_id}
+
+    out = {}
+    for kind, cols in (("kills", two_sided), ("damages", two_sided), ("blinds", two_sided), ("shots", ("team",)), ("utility", ("team",)), ("plants", ("team",)), ("zooms", ("team",))):
+        out[kind] = [k for k in (keep(r, cols) for r in points.get(kind, [])) if k is not None]
+    return out
 
 
 HEAT_CELL = 4  # radar px per movement-heatmap cell (1024 px radar -> 256 x 256)
 
 
-@lru_cache(maxsize=2)
-def _frames(d: Path, _stamp: float) -> tuple[pl.DataFrame, float, str]:
-    """Alive player positions over the whole match with round, seconds after freeze end and team."""
+def _load_frames(d: Path, replay: bool) -> tuple[pl.DataFrame, float, str]:
     m = load_match(d)
     path = d / "replay.parquet"
-    src = pl.read_parquet(path, columns=["tick", "steamid", "name", "side", "x", "y", "z", "health"]) if path.exists() else m.data["snapshots"]
+    src = pl.read_parquet(path, columns=["tick", "steamid", "name", "side", "x", "y", "z", "health"]) if replay and path.exists() else m.data["snapshots"]
     f = src.select("tick", "steamid", "name", "side", "x", "y", "z", "health").filter(pl.col("health") > 0)
     f = _sec(with_round(f, m.rounds), m.tick_rate).join(m.teams, on="steamid", how="inner")
     step = float(f["tick"].unique().sort().diff().drop_nulls().min() or 1)
-    return f.select("round_num", "sec", "name", "side", "team", "x", "y", "z"), step / m.tick_rate, m.map_name
+    f = _with_context(f, round_context(m), alive_counts(m), "team", "side")
+    return f.select("round_num", "sec", "name", "side", "team", "x", "y", "z", *CONTEXT_COLS), step / m.tick_rate, m.map_name
+
+
+@lru_cache(maxsize=2)
+def _frames(d: Path, _stamp: float) -> tuple[pl.DataFrame, float, str]:
+    """Alive player positions over the whole match with round, seconds after freeze end, team and context."""
+    return _load_frames(d, replay=True)
+
+
+@lru_cache(maxsize=32)
+def _coarse_frames(d: Path, _stamp: float) -> tuple[pl.DataFrame, float, str]:
+    """Like ``_frames`` at the snapshot rate: a density over many matches needs no more, and they all stay in memory."""
+    return _load_frames(d, replay=False)
+
+
+def _context_filter(f: pl.DataFrame, buy: str, opp_buy: str, pistol: str, man: str) -> pl.DataFrame:
+    """Rows of a team's point of view under a context: buy, enemy's buy, after a pistol ``loss``/``win``, ``up``/``even``/``down``."""
+    if buy:
+        f = f.filter(pl.col("buy") == buy)
+    if opp_buy:
+        f = f.filter(pl.col("opp_buy") == opp_buy)
+    if pistol:
+        f = f.filter(pl.col("after_pistol_loss") == (pistol == "loss"))
+    if man == "up":
+        f = f.filter(pl.col("man_diff") > 0)
+    elif man == "even":
+        f = f.filter(pl.col("man_diff") == 0)
+    elif man == "down":
+        f = f.filter(pl.col("man_diff") < 0)
+    return f
 
 
 @lru_cache(maxsize=256)
-def _movement(d: Path, _stamp: float, team: str, side: str, player: str, r0: int, r1: int, t0: float, t1: float) -> dict:
+def _movement(
+    d: Path, _stamp: float, team: str, side: str, player: str, r0: int, r1: int, t0: float, t1: float,
+    buy: str = "", opp_buy: str = "", pistol: str = "", man: str = "",
+) -> dict:
     f, dt, map_name = _frames(d, _stamp)
     f = f.filter(pl.col("round_num").is_between(r0, r1) & pl.col("sec").is_between(t0, t1))
     if team:
@@ -302,7 +426,12 @@ def _movement(d: Path, _stamp: float, team: str, side: str, player: str, r0: int
         f = f.filter(pl.col("side") == side)
     if player:
         f = f.filter(pl.col("name") == player)
-    meta = _map_meta(map_name)
+    f = _context_filter(f, buy, opp_buy, pistol, man)
+    return _density(f, _map_meta(map_name), dt)
+
+
+def _density(f: pl.DataFrame, meta: dict, dt: float) -> dict:
+    """Positions binned into radar cells, one list per level."""
     out = []
     for lv in meta["levels"]:
         g = f.filter((pl.col("z") >= lv["z_min"]) & (pl.col("z") < lv["z_max"])) if len(meta["levels"]) > 1 else f
@@ -416,12 +545,8 @@ def create_app(out: str | Path = "out") -> FastAPI:
     @api.get("/api/library")
     def library() -> dict:
         matches = []
-        for d in lib.matches():
-            if d.name in (UPLOADS,):
-                continue
+        for d in lib.extracts():
             manifest = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
-            if "header" not in manifest:  # e.g. an aggregate directory
-                continue
             entry = {"id": d.name, "map": manifest["header"].get("map_name"), "has_replay": (d / "replay.parquet").exists(),
                      "modified": _stamp(d), "busy": jobs.active_for_match(d.name) is not None}
             try:
@@ -503,7 +628,7 @@ def create_app(out: str | Path = "out") -> FastAPI:
             raise HTTPException(409, "the match is being processed; wait for the job to finish")
         source = lib.demo_for(d) if demo else None
         shutil.rmtree(d)
-        for cached in (_overview, _tactics, _points, _highlights):
+        for cached in (_overview, _tactics, _points, _highlights, _frames, _coarse_frames, _movement, _match_data, _report):
             cached.cache_clear()
         deleted_demo = None
         if source is not None and lib.owns_demo(source):
@@ -696,9 +821,10 @@ def create_app(out: str | Path = "out") -> FastAPI:
     def match_movement(
         match_id: str, team: str = "", side: str = "", player: str = "",
         round_from: int = 1, round_to: int = 999, t_from: float = -30, t_to: float = 300,
+        buy: str = "", opp_buy: str = "", pistol: str = "", man: str = "",
     ) -> dict:
         d = lib.match_dir(match_id)
-        return _movement(d, _stamp(d), team, side, player, round_from, round_to, t_from, t_to)
+        return _movement(d, _stamp(d), team, side, player, round_from, round_to, t_from, t_to, buy, opp_buy, pistol, man)
 
     @api.get("/api/matches/{match_id}/throws")
     def match_throws(match_id: str) -> dict:
@@ -794,6 +920,11 @@ def create_app(out: str | Path = "out") -> FastAPI:
         clean = re.sub(r'["\n\r;]|//', " ", name).strip()[:64]
         return f'spec_player "{clean}"'
 
+    @api.get("/api/maps")
+    def map_list() -> list[str]:
+        """Maps with a config."""
+        return available_maps()
+
     @api.get("/api/maps/{map_name}")
     def map_meta(map_name: str) -> dict:
         return _map_meta(map_name)
@@ -804,6 +935,146 @@ def create_app(out: str | Path = "out") -> FastAPI:
         if p is None:
             raise HTTPException(404, f"radar {name} is not in the local awpy cache")
         return FileResponse(p, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
+    # ---- teams and opponent reports ----
+    def match_index() -> list[dict]:
+        """Every readable match, newest first; a broken extract should not hide the others."""
+        out = []
+        for d in lib.extracts():
+            try:
+                ov = _overview(d, _stamp(d))
+            except Exception:  # noqa: BLE001
+                continue
+            out.append({"dir": d, "id": d.name, "map": ov["map"], "date": lib.match_date(d), "teams": list(ov["score"]), "players": ov["players"]})
+        return sorted(out, key=lambda m: -m["date"])
+
+    def scope_of(team: str, map_name: str, last: int) -> tuple[tuple[Path, float, float], ...]:
+        aliases = lib.aliases()
+        found = [m for m in match_index() if m["map"] == map_name and team in {aliases.get(t, t) for t in m["teams"]}]
+        if not found:
+            raise HTTPException(404, f"no matches of {team} on {map_name}")
+        if last > 0:
+            found = found[:last]
+        return tuple((m["dir"], _stamp(m["dir"]), m["date"]) for m in found)
+
+    def alias_key() -> tuple[tuple[str, str], ...]:
+        return tuple(sorted(lib.aliases().items()))
+
+    def report_of(team: str, map_name: str, last: int, side: str, buy: str, rounds_last: int) -> dict:
+        try:
+            return _report(scope_of(team, map_name, last), team, alias_key(), side, buy, rounds_last)
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @api.get("/api/teams")
+    def teams_list() -> dict:
+        """Teams as named after their aliases, their matches per map, and names that look like one team by roster."""
+        aliases = lib.aliases()
+        index = match_index()
+        teams: dict[str, dict] = {}
+        rosters: dict[str, set[str]] = {}
+        for m in index:
+            for raw in m["teams"]:
+                name = aliases.get(raw, raw)
+                e = teams.setdefault(name, {"name": name, "raw": set(), "matches": 0, "maps": {}, "last_date": 0.0})
+                e["raw"].add(raw)
+                e["matches"] += 1
+                e["maps"][m["map"]] = e["maps"].get(m["map"], 0) + 1
+                e["last_date"] = max(e["last_date"], m["date"])
+                rosters.setdefault(raw, set()).update(str(p["steamid"]) for p in m["players"] if p.get("team") == raw)
+        listed = sorted(teams.values(), key=lambda e: (-e["matches"], e["name"].lower()))
+        return {
+            "teams": [e | {"raw": sorted(e["raw"])} for e in listed],
+            "suggestions": roster_suggestions(rosters, aliases),
+            "own": lib.setting("own_team"),
+        }
+
+    @api.post("/api/teams/alias")
+    def team_alias(raw: str = Body(...), name: str | None = Body(None)) -> dict:
+        """Report the name ``raw`` from demos as the team ``name``; an empty name brings it back on its own."""
+        aliases = lib.aliases()
+        name = (name or "").strip()
+        if name and name != raw:
+            aliases[raw] = name
+        else:
+            aliases.pop(raw, None)
+        lib.set_setting("team_aliases", aliases or None)
+        return {"aliases": aliases}
+
+    @api.post("/api/teams/own")
+    def team_own(name: str | None = Body(None, embed=True)) -> dict:
+        lib.set_setting("own_team", name or None)
+        return {"own": name or None}
+
+    @api.get("/api/scout/report")
+    def scout_report(team: str, map: str, last: int = 10, side: str = "", buy: str = "", rounds_last: int = 0) -> dict:
+        return report_of(team, map, last, side, buy, rounds_last)
+
+    @api.get("/api/matches/{match_id}/insights")
+    def match_insights(match_id: str) -> dict:
+        """The conclusions of a report on this one match, per team; names as in the demo, no aliases."""
+        d = lib.match_dir(match_id)
+        scope = ((d, _stamp(d), lib.match_date(d)),)
+        out = {}
+        for team in _overview(d, _stamp(d))["score"]:
+            r = _report(scope, team, (), "", "", 0)
+            out[team] = {"sample": r["sample"], "cards": r["cards"]}
+        return out
+
+    def selected_rounds(report: dict) -> dict[str, set[int]]:
+        out: dict[str, set[int]] = {}
+        for r in report["rounds"]:
+            out.setdefault(r["match"], set()).add(r["round_num"])
+        return out
+
+    @api.get("/api/scout/points")
+    def scout_points(team: str, map: str, last: int = 10, side: str = "", buy: str = "", rounds_last: int = 0) -> dict:
+        """The team's heatmap rows over several matches: the rows of ``/api/matches/{id}/points`` plus ``match_id``."""
+        aliases = lib.aliases()
+        selected = selected_rounds(report_of(team, map, last, side, buy, rounds_last))
+        out: dict = {"map": map, "utility_error": None, **{k: [] for k in ("kills", "utility", "shots", "damages", "blinds", "plants", "zooms")}}
+        for d, stamp, _date in scope_of(team, map, last):
+            if d.name not in selected:
+                continue
+            points = _points(d, stamp)
+            raw = {t for t in _overview(d, stamp)["score"] if aliases.get(t, t) == team}
+            for kind, found in _scouted_points(points, selected[d.name], raw, aliases, d.name).items():
+                out[kind] += found
+            out["utility_error"] = out["utility_error"] or points["utility_error"]
+        return out
+
+    @api.get("/api/scout/movement")
+    def scout_movement(
+        team: str, map: str, last: int = 10, side: str = "", buy: str = "", rounds_last: int = 0, player: str = "",
+        t_from: float = -30, t_to: float = 300, opp_buy: str = "", pistol: str = "", man: str = "",
+    ) -> dict:
+        aliases = lib.aliases()
+        selected = selected_rounds(report_of(team, map, last, side, buy, rounds_last))
+        frames, dt = [], 0.5
+        for d, stamp, _date in scope_of(team, map, last):
+            if d.name not in selected:
+                continue
+            f, dt, _map = _coarse_frames(d, stamp)
+            raw = [t for t in _overview(d, stamp)["score"] if aliases.get(t, t) == team]
+            f = f.filter(pl.col("team").is_in(raw) & pl.col("round_num").is_in(list(selected[d.name])) & pl.col("sec").is_between(t_from, t_to))
+            if player:
+                f = f.filter(pl.col("name") == player)
+            frames.append(_context_filter(f, "", opp_buy, pistol, man))
+        return _density(pl.concat(frames), _map_meta(map), dt)
+
+    @api.get("/api/scout/similar")
+    def scout_similar(team: str, map: str, match: str, round: int, n: int = 8) -> list[dict]:
+        """The closest rounds in the whole library on this map, of any team."""
+        aliases = lib.aliases()
+        corpus = [_match_data(m["dir"], _stamp(m["dir"]), m["date"]) for m in match_index() if m["map"] == map]
+        d = lib.match_dir(match)
+        raw = next((t for t in _overview(d, _stamp(d))["score"] if aliases.get(t, t) == team), None)
+        if raw is None:
+            raise HTTPException(404, f"{team} did not play {match}")
+        try:
+            return _json_ready(similar_rounds(corpus, match, round, raw, n))
+        except KeyError as e:
+            raise HTTPException(404, f"no such round: {e}") from e
 
     @api.post("/api/aggregate")
     def aggregate_matches(ids: list[str] = Body(...), aliases: dict[str, str] = Body(default_factory=dict)) -> JSONResponse:

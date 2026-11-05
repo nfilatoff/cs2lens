@@ -74,9 +74,11 @@ export function drawHeat(ctx: CanvasRenderingContext2D, grid: Float32Array, ox: 
   if (max <= 0) return;
   const stops = PALETTES[o.palette]?.stops ?? PALETTES.inferno.stops;
   const img = new ImageData(GRID, GRID);
-  const lmax = Math.log1p(max);
+  // a blurred grid of few events stays below 1, where a log is nearly linear: stretch it, or it hardly shows
+  const stretch = Math.max(1, 20 / max);
+  const lmax = Math.log1p(max * stretch);
   for (let k = 0; k < g.length; k++) {
-    const v = o.scale === "log" ? Math.log1p(g[k]) / lmax : Math.pow(g[k] / max, 0.7);
+    const v = o.scale === "log" ? Math.log1p(g[k] * stretch) / lmax : Math.pow(g[k] / max, 0.7);
     if (v < 0.05) continue;
     const [r, gg, b] = color(stops, v);
     img.data[k * 4] = r;

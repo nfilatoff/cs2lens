@@ -213,7 +213,7 @@ def tactics(directory: str | Path) -> dict[str, pl.DataFrame]:
     """Compute tactical tables.
 
     Returns ``rounds_t`` (one row per T round), ``executes`` (per team and target site),
-    ``setups`` (CT setups with round results) and ``rotations`` (per CT team).
+    ``executes_by_buy`` (the same per type of round), ``setups`` (CT setups with round results) and ``rotations`` (per CT team).
     """
     m = load_match(directory, extra_tables=("damages", "fires", "shots"))
     zoner = SiteZoner(m)
@@ -314,6 +314,20 @@ def tactics(directory: str | Path) -> dict[str, pl.DataFrame]:
         .sort("team", "target_site")
     )
 
+    executes_by_buy = (
+        t_rounds.filter(pl.col("target_site").is_not_null())
+        .group_by("team", "buy", "target_site")
+        .agg(
+            rounds=pl.len(),
+            wins=pl.col("won").sum(),
+            plants=pl.col("plant_site").is_not_null().sum(),
+            avg_exec_start_sec=pl.col("exec_sec").mean().round(1),
+            avg_plant_sec=pl.col("plant_sec").mean().round(1),
+        )
+        .with_columns(win_pct=pct(pl.col("wins"), pl.col("rounds")))
+        .sort("team", "buy", "target_site")
+    )
+
     # ---- CT side: setup at SETUP_SEC after freeze end, or at first contact if that comes first ----
     ct_rounds = m.tr.filter(pl.col("side") == "counter-terrorist").select("round_num", "team", "won", "buy").join(
         contact.select("round_num", "contact_tick"), on="round_num", how="left"
@@ -386,4 +400,4 @@ def tactics(directory: str | Path) -> dict[str, pl.DataFrame]:
         .sort("team", "plant_site")
     )
 
-    return {"rounds_t": t_rounds, "executes": executes, "setups": setups, "rotations": rotations}
+    return {"rounds_t": t_rounds, "executes": executes, "executes_by_buy": executes_by_buy, "setups": setups, "rotations": rotations}

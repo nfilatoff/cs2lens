@@ -4,15 +4,17 @@ import { LibraryPage } from "./pages/Library";
 import { MatchPage } from "./pages/Match";
 import { AggregatePage } from "./pages/Aggregate";
 import { HighlightsPage } from "./pages/Highlights";
+import { CalloutsPage } from "./pages/Callouts";
+import { ScoutPage } from "./pages/Scout";
 import { ClipView } from "./components/ClipView";
 import { LineupsView } from "./components/LineupsView";
-import { IconFilm, IconGrenade, IconLibrary, IconLogo, IconStar, IconStats } from "./components/Icons";
+import { IconLibrary, IconLogo, IconMap, IconScout, IconStar, IconUs } from "./components/Icons";
 import { LANGS, detectSystemLang, setLang, t, useLang, type Key, type Lang } from "./i18n";
 
 // Hash routes: #/ (library), #/match/<id>/<tab>[/<round>[/<seconds after freeze end>]], #/aggregate, #/clip, #/lineups,
-// #/highlights[/<id>]
+// #/highlights[/<id>], #/callouts[/<map>], #/scout[/<team>[/<map>[/<tab>]]][?last=&side=&buy=&rounds=]
 function useHash(): string[] {
-  const read = () => window.location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+  const read = () => window.location.hash.split("?")[0].replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   const [parts, setParts] = useState(read);
   useEffect(() => {
     const on = () => setParts(read());
@@ -22,6 +24,9 @@ function useHash(): string[] {
   return parts;
 }
 
+/** The ?a=b part of the hash route. */
+export const hashQuery = () => new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+
 export const go = (...parts: (string | number)[]) => {
   window.location.hash = "#/" + parts.map((p) => encodeURIComponent(String(p))).join("/");
 };
@@ -30,14 +35,23 @@ export function App() {
   const [page, ...rest] = useHash();
   const lang = useLang();
   useEffect(() => detectSystemLang(() => api.system().then((s) => s.locale)), []);
+  const [own, setOwn] = useState<string | null>(null);
+  useEffect(() => {
+    api.teams().then((d) => setOwn(d.own)).catch(() => {});
+  }, []);
+  const us = own ? `scout/${encodeURIComponent(own)}` : null;
   const nav: [string, Key, typeof IconLibrary][] = [
     ["", "nav.library", IconLibrary],
-    ["aggregate", "nav.matches", IconStats],
-    ["clip", "nav.clips", IconFilm],
-    ["lineups", "nav.lineups", IconGrenade],
+    ["scout", "nav.scout", IconScout],
+    ...(us ? [[us, "nav.us", IconUs] as [string, Key, typeof IconLibrary]] : []),
     ["highlights", "nav.highlights", IconStar],
+    ["callouts", "nav.callouts", IconMap],
   ];
-  const active = page === "match" ? "" : page ?? "";
+  // the old pages stay reachable from the scout page: they live under it
+  const active = page === "match" ? ""
+    : page === "scout" && own && rest[0] === own ? us ?? ""
+    : page === "aggregate" || page === "clip" || page === "lineups" ? "scout"
+    : page ?? "";
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -65,6 +79,10 @@ export function App() {
         <main key={lang}>
           {page === "match" && rest[0] ? (
             <MatchPage id={rest[0]} tab={rest[1] ?? "overview"} round={rest[2] ? Number(rest[2]) : undefined} at={rest[3] ? Number(rest[3]) : undefined} />
+          ) : page === "callouts" ? (
+            <CalloutsPage map={rest[0]} />
+          ) : page === "scout" ? (
+            <ScoutPage team={rest[0]} map={rest[1]} tab={rest[2] ?? "summary"} onOwn={setOwn} />
           ) : page === "aggregate" ? (
             <AggregatePage />
           ) : page === "clip" ? (

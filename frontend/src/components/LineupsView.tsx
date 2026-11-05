@@ -4,6 +4,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type CS2Status, type Lineup, type MatchOverview, type Throw, type Throws } from "../api";
 import { download } from "../clipExport";
+import { drawCallouts, useCallouts } from "../callouts";
+import { CalloutToggle } from "./CalloutToggle";
 import { drawRadar, levelLabel, levelOf, sideColor, sideShort, useMapAssets, worldToPx, type MapAssets } from "../radar";
 import { MatchPicker } from "./MatchPicker";
 import { t, td } from "../i18n";
@@ -108,7 +110,7 @@ function jsonExport(map: string, throws: MatchThrow[]) {
   };
 }
 
-function drawLineups(canvas: HTMLCanvasElement, assets: MapAssets, groups: Group[], selected: Group | null, size: number) {
+function drawLineups(canvas: HTMLCanvasElement, assets: MapAssets, groups: Group[], selected: Group | null, size: number, callouts: boolean) {
   const { meta, images } = assets;
   const ctx = canvas.getContext("2d")!;
   const dpr = window.devicePixelRatio || 1;
@@ -119,6 +121,7 @@ function drawLineups(canvas: HTMLCanvasElement, assets: MapAssets, groups: Group
     drawRadar(ctx, images[li], ox, size);
     ctx.fillStyle = "rgba(0,0,0,0.3)";
     ctx.fillRect(ox, 0, size, size);
+    if (callouts) drawCallouts(ctx, meta, li, ox, size);
     const P = (x: number, y: number): [number, number] => {
       const [px, py] = worldToPx(meta, x, y);
       return [ox + px * k, py * k];
@@ -200,9 +203,9 @@ function drawLineups(canvas: HTMLCanvasElement, assets: MapAssets, groups: Group
   });
 }
 
-export function LineupsView({ initial }: { initial?: MatchOverview }) {
-  const [map, setMap] = useState(initial?.map ?? "");
-  const [ids, setIds] = useState<string[]>(initial ? [initial.id] : []);
+export function LineupsView({ initial, scope }: { initial?: MatchOverview; scope?: { map: string; ids: string[] } }) {
+  const [map, setMap] = useState(scope?.map ?? initial?.map ?? "");
+  const [ids, setIds] = useState<string[]>(scope?.ids ?? (initial ? [initial.id] : []));
   const [data, setData] = useState<Map<string, Throws>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -258,9 +261,10 @@ export function LineupsView({ initial }: { initial?: MatchOverview }) {
 
   const n = assets?.meta.levels.length ?? 1;
   const size = Math.min(720, Math.floor((window.innerWidth - 480) / n));
+  const callouts = useCallouts();
   useEffect(() => {
-    if (canvasRef.current && assets) drawLineups(canvasRef.current, assets, groups, selected, size);
-  }, [assets, groups, selected, size]);
+    if (canvasRef.current && assets) drawLineups(canvasRef.current, assets, groups, selected, size, callouts);
+  }, [assets, groups, selected, size, callouts]);
 
   const pickAt = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!assets) return;
@@ -375,13 +379,16 @@ export function LineupsView({ initial }: { initial?: MatchOverview }) {
         {mapError2 ? <div className="error">{mapError2}</div> : !ids.length ? (
           <div className="muted">{t("common.pickDemos")}</div>
         ) : !assets ? <div className="muted">{t("common.loading")}</div> : (
-          <canvas
-            ref={canvasRef}
-            width={size * n * (window.devicePixelRatio || 1)}
-            height={size * (window.devicePixelRatio || 1)}
-            style={{ width: size * n, height: size, borderRadius: 6, cursor: "pointer" }}
-            onClick={pickAt}
-          />
+          <>
+            <CalloutToggle meta={assets.meta} />
+            <canvas
+              ref={canvasRef}
+              width={size * n * (window.devicePixelRatio || 1)}
+              height={size * (window.devicePixelRatio || 1)}
+              style={{ width: size * n, height: size, borderRadius: 6, cursor: "pointer" }}
+              onClick={pickAt}
+            />
+          </>
         )}
         {selected && (
           <div className="lineup-card">

@@ -7,18 +7,22 @@ import { MapsView } from "../components/MapsView";
 import { ClipView } from "../components/ClipView";
 import { LineupsView } from "../components/LineupsView";
 import { HighlightsView } from "../components/HighlightsView";
+import { InsightCards } from "../components/InsightCards";
 import { sideColor, sideShort } from "../radar";
 import { t, td, type Key } from "../i18n";
 
+// A match is for going through one game; what spans games lives on the scout page.
 const TABS: [string, Key][] = [
   ["overview", "tab.overview"],
-  ["players", "tab.players"],
-  ["tactics", "tab.tactics"],
   ["replay", "tab.replay"],
   ["maps", "tab.maps"],
+  ["highlights", "tab.highlights"],
+];
+const MORE_TABS: [string, Key][] = [
+  ["players", "tab.players"],
+  ["tactics", "tab.tactics"],
   ["lineups", "tab.lineups"],
   ["clip", "tab.clip"],
-  ["highlights", "tab.highlights"],
 ];
 
 /** How a round ended, in words. */
@@ -71,6 +75,13 @@ export function MatchPage({ id, tab, round, at }: { id: string; tab: string; rou
             {t(label)}
           </a>
         ))}
+        <span className="tabs-more">
+          {MORE_TABS.map(([key, label]) => (
+            <a key={key} href={`#/match/${encodeURIComponent(id)}/${key}`} className={tab === key ? "active" : ""}>
+              {t(label)}
+            </a>
+          ))}
+        </span>
       </div>
       {tab === "overview" && <Overview match={match} />}
       {tab === "players" && (
@@ -129,6 +140,29 @@ function RoundStrip({ match }: { match: MatchOverview }) {
   );
 }
 
+/** What each team did in this match, before any table. */
+function MatchInsights({ id }: { id: string }) {
+  const [data, setData] = useState<Awaited<ReturnType<typeof api.insights>> | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api.insights(id).then((d) => alive && setData(d)).catch(() => alive && setData({}));
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+  if (!data) return <div className="muted">{t("common.loading")}</div>;
+  return (
+    <>
+      {Object.entries(data).map(([team, ins]) => (
+        <div key={team}>
+          <h3>{team}</h3>
+          <InsightCards cards={ins.cards} limit={4} />
+        </div>
+      ))}
+    </>
+  );
+}
+
 function Overview({ match }: { match: MatchOverview }) {
   const ts = match.team_stats;
   return (
@@ -136,6 +170,10 @@ function Overview({ match }: { match: MatchOverview }) {
       <h2>{t("overview.flow")}</h2>
       <div className="muted small">{t("overview.hint")}</div>
       <RoundStrip match={match} />
+      <h2>{t("overview.insights")}</h2>
+      <MatchInsights id={match.id} />
+      <details className="data-more">
+      <summary>{t("scout.showData")}</summary>
       <DataTable
         title={t("overview.rounds")}
         maxHeight={360}
@@ -166,6 +204,7 @@ function Overview({ match }: { match: MatchOverview }) {
         <DataTable title={t("overview.bombCt")} rows={ts.bomb_ct} />
       </div>
       <DataTable title={t("overview.byBuy")} rows={ts.by_buy} />
+      </details>
     </div>
   );
 }
@@ -187,6 +226,7 @@ function Tactics({ id }: { id: string }) {
       {res.tables && (
         <>
           <DataTable title={t("tactics.executes")} rows={res.tables.executes} />
+          <DataTable title={t("agg.s.executes_by_buy")} rows={res.tables.executes_by_buy ?? []} />
           <DataTable
             title={t("tactics.roundsT")}
             rows={res.tables.rounds_t}

@@ -84,6 +84,131 @@ export interface Points {
   damages: Row[];
   blinds: Row[];
   plants: Row[];
+  zooms: Row[];
+}
+
+/** Filters of a movement density; a report over several matches ignores team and rounds (its panel sets them). */
+export interface MovementFilter {
+  team: string;
+  side: string;
+  player: string;
+  round_from: number;
+  round_to: number;
+  t_from: number;
+  t_to: number;
+  buy: string;
+  opp_buy: string;
+  pistol: string;
+  man: string;
+}
+
+export interface ScoutTeam {
+  name: string;
+  raw: string[];
+  matches: number;
+  maps: Record<string, number>;
+  last_date: number;
+}
+
+export interface Teams {
+  teams: ScoutTeam[];
+  suggestions: { a: string; b: string; common: number }[];
+  own: string | null;
+}
+
+export interface RoundRef {
+  match: string;
+  round: number;
+  sec: number;
+}
+
+/** A conclusion: its words are scout.card.<key> filled with params. */
+export interface ScoutCard {
+  key: string;
+  params: Record<string, string | number | { type: string; zone: string; share_pct: number }[]>;
+  rounds: number;
+  low: boolean;
+  examples: RoundRef[];
+}
+
+export interface TimingCell {
+  side: Side;
+  zone: string;
+  kind: string; // smoke | flash | he | molotov | enter
+  bin: number;
+  rounds: number;
+  examples: RoundRef[];
+}
+
+export interface Strat {
+  id: number;
+  site: string;
+  core: { type: string; zone: string; share_pct: number }[];
+  rounds: number;
+  share_pct: number;
+  wins: number;
+  win_pct: number;
+  plants: number;
+  plant_sites: string[];
+  tempo: Record<string, number>;
+  median_exec_sec: number | null;
+  median_plant_sec: number | null;
+  buys: string[];
+  examples: RoundRef[];
+  spots: { type: string; x: number; y: number; z: number }[];
+}
+
+export interface MultiroundPlayer {
+  steamid: string;
+  name: string;
+  side: Side;
+  rounds: number;
+  zones: { zone: string; rounds: number; share_pct: number }[];
+  never: string[];
+  spots: { x: number; y: number; z: number; match: string; round: number }[];
+}
+
+export interface ScoutReport {
+  team: string;
+  sample: { matches: number; rounds: number; wins: number; t_rounds: number; ct_rounds: number; win_pct: number | null; low: boolean };
+  matches: { id: string; date: number }[];
+  warnings: string[];
+  cards: ScoutCard[];
+  more_cards: ScoutCard[];
+  economy: { by_buy: Row[]; after_pistol: Row[]; loss_streak: Row[] };
+  executes_by_buy: Row[];
+  setups: Row[];
+  nades: Row[];
+  players: Row[];
+  weapons: Row[];
+  timings: { step: number; max: number; cells: TimingCell[]; totals: Record<string, number> };
+  playbook: { total: number; one_offs: number; strats: Strat[] };
+  multiround: MultiroundPlayer[];
+  rounds: Row[];
+}
+
+export interface ScoutQuery {
+  team: string;
+  map: string;
+  last: number;
+  side: string;
+  buy: string;
+  rounds_last: number;
+}
+
+export interface SimilarRound {
+  match: string;
+  round: number;
+  team: string;
+  side: Side;
+  score: number;
+  buy: string | null;
+  won: boolean;
+  target_site: string | null;
+  tempo: string | null;
+  package: string | null;
+  setup: string | null;
+  sec: number;
 }
 
 export interface Movement {
@@ -355,6 +480,7 @@ const json = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 const m = (id: string) => `/api/matches/${encodeURIComponent(id)}`;
+const query = (o: object) => new URLSearchParams(Object.entries(o).map(([k, v]) => [k, String(v)])).toString();
 
 export const api = {
   library: () => request<Library>("/api/library"),
@@ -389,8 +515,17 @@ export const api = {
   match: (id: string) => request<MatchOverview>(m(id)),
   tactics: (id: string) => request<TacticsResult>(`${m(id)}/tactics`),
   points: (id: string) => request<Points>(`${m(id)}/points`),
-  movement: (id: string, f: { team: string; side: string; player: string; round_from: number; round_to: number; t_from: number; t_to: number }) =>
-    request<Movement>(`${m(id)}/movement?${new URLSearchParams(Object.entries(f).map(([k, v]) => [k, String(v)]))}`),
+  movement: (id: string, f: MovementFilter) => request<Movement>(`${m(id)}/movement?${query(f)}`),
+  insights: (id: string) => request<Record<string, { sample: ScoutReport["sample"]; cards: ScoutCard[] }>>(`${m(id)}/insights`),
+  teams: () => request<Teams>("/api/teams"),
+  teamAlias: (raw: string, name: string | null) => request<{ aliases: Record<string, string> }>("/api/teams/alias", json({ raw, name })),
+  teamOwn: (name: string | null) => request<{ own: string | null }>("/api/teams/own", json({ name })),
+  scoutReport: (q: ScoutQuery) => request<ScoutReport>(`/api/scout/report?${query(q)}`),
+  scoutPoints: (q: ScoutQuery) => request<Points>(`/api/scout/points?${query(q)}`),
+  scoutMovement: (q: ScoutQuery, f: Pick<MovementFilter, "player" | "t_from" | "t_to" | "opp_buy" | "pistol" | "man">) =>
+    request<Movement>(`/api/scout/movement?${query({ ...q, ...f })}`),
+  scoutSimilar: (team: string, map: string, match: string, round: number) =>
+    request<SimilarRound[]>(`/api/scout/similar?${query({ team, map, match, round })}`),
   throws: (id: string) => request<Throws>(`${m(id)}/throws`),
   cs2: () => request<CS2Status>("/api/cs2"),
   cs2ConsoleTest: () => request<{ mode: "netcon" | "key" }>("/api/cs2/console-test", { method: "POST" }),
@@ -419,6 +554,7 @@ export const api = {
   recordings: (id: string) => request<Recording[]>(`${m(id)}/recordings`),
   deleteRecording: (id: string, name: string) => request<{ deleted: string }>(`${m(id)}/recordings/${encodeURIComponent(name)}`, { method: "DELETE" }),
   replay: (id: string, round: number) => request<Replay>(`${m(id)}/rounds/${round}/replay`),
+  maps: () => request<string[]>("/api/maps"),
   mapMeta: (map: string) => request<MapMeta>(`/api/maps/${map}`),
   aggregate: (ids: string[], aliases: Record<string, string>) =>
     request<{ tables: Tables; warnings: string[] }>("/api/aggregate", json({ ids, aliases })),
