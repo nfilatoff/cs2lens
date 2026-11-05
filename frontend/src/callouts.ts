@@ -1,5 +1,6 @@
 // Position names over a radar: the zones of the map config, one label per zone and level.
-// The switch is shared by every radar of the app and remembered in this browser.
+// The mode (off, names, names with zone outlines) is shared by every radar of the app and
+// remembered in this browser.
 import { useSyncExternalStore } from "react";
 import type { MapMeta } from "./api";
 import { RADAR_SIZE, worldToPx } from "./radar";
@@ -9,32 +10,37 @@ type Pt = [number, number];
 
 const STORAGE = "cs2lens.callouts";
 
-function saved(): boolean {
+export type CalloutMode = "off" | "names" | "full";
+
+function saved(): CalloutMode {
   try {
-    return localStorage.getItem(STORAGE) === "1";
+    const v = localStorage.getItem(STORAGE);
+    if (v === "names" || v === "full") return v;
+    return v === "1" ? "full" : "off"; // "1" and "0": the on/off switch this replaced
   } catch {
-    return false;
+    return "off";
   }
 }
 
-let current = saved();
+let current: CalloutMode = saved();
 const listeners = new Set<() => void>();
 const subscribe = (l: () => void) => {
   listeners.add(l);
   return () => listeners.delete(l);
 };
 
-export const calloutsOn = () => current;
-export function setCallouts(on: boolean) {
-  current = on;
+export const calloutMode = () => current;
+export const calloutsOn = () => current !== "off";
+export function setCalloutMode(mode: CalloutMode) {
+  current = mode;
   try {
-    localStorage.setItem(STORAGE, on ? "1" : "0");
+    localStorage.setItem(STORAGE, mode);
   } catch {
     /* storage blocked: the choice lasts until the page is reloaded */
   }
   listeners.forEach((l) => l());
 }
-export const useCallouts = () => useSyncExternalStore(subscribe, calloutsOn);
+export const useCalloutMode = () => useSyncExternalStore(subscribe, calloutMode);
 
 // ---- where a label goes ----
 
@@ -172,7 +178,7 @@ function placeLabels(ctx: Ctx, meta: MapMeta, li: number, size: number, h: numbe
 
 export interface CalloutOptions {
   highlight?: string | null; // a zone to fill
-  labels?: boolean; // default true
+  mode?: CalloutMode; // default: the shared mode; "off" draws only the highlight
 }
 
 /** Zone outlines and names on one radar panel of `size` px at (ox, 0); draw it under the players. */
@@ -180,14 +186,16 @@ export function drawCallouts(ctx: Ctx, meta: MapMeta, li: number, ox: number, si
   if (!meta.zones.length) return;
   const k = size / RADAR_SIZE;
   const { polys } = levelZones(meta, li);
+  const mode = o.mode ?? current;
   ctx.save();
   ctx.translate(ox, 0);
   ctx.lineWidth = 1;
   for (const { name, poly } of polys) {
+    const lit = name === o.highlight;
+    if (!lit && mode !== "full") continue;
     ctx.beginPath();
     poly.forEach(([x, y], i) => (i ? ctx.lineTo(x * k, y * k) : ctx.moveTo(x * k, y * k)));
     ctx.closePath();
-    const lit = name === o.highlight;
     if (lit) {
       ctx.fillStyle = "rgba(255,85,0,0.4)";
       ctx.fill();
@@ -195,7 +203,7 @@ export function drawCallouts(ctx: Ctx, meta: MapMeta, li: number, ox: number, si
     ctx.strokeStyle = lit ? "#ff5500" : "rgba(255,255,255,0.28)";
     ctx.stroke();
   }
-  if (o.labels !== false) {
+  if (mode !== "off") {
     const font = Math.max(9, Math.min(14, size * 0.0135));
     const h = Math.round(font * 1.35);
     ctx.font = `600 ${font}px system-ui, sans-serif`;

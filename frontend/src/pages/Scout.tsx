@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type MovementFilter, type MultiroundPlayer, type RoundRef, type Row, type ScoutQuery, type ScoutReport, type ScoutTeam, type SimilarRound, type Strat, type Teams } from "../api";
 import { go, hashQuery } from "../App";
-import { drawCallouts, useCallouts } from "../callouts";
+import { drawCallouts, useCalloutMode } from "../callouts";
 import { CalloutToggle } from "../components/CalloutToggle";
 import { ClipView } from "../components/ClipView";
 import { DataTable } from "../components/DataTable";
@@ -548,9 +548,9 @@ function MultiroundView({ players, map }: { players: MultiroundPlayer[]; map: st
   const sel = players.find((p) => `${p.steamid}|${p.side}` === key) ?? players[0];
   const levels = assets?.meta.levels.length ?? 1;
   const size = Math.min(480, Math.floor((window.innerWidth - 180) / levels));
-  const callouts = useCallouts();
+  const callouts = useCalloutMode();
   useEffect(() => {
-    if (ref.current && assets && sel) drawSpots(ref.current, assets, size, sel.spots.map((s) => ({ ...s, color: sideColor(sel.side), r: 4 })), callouts);
+    if (ref.current && assets && sel) drawSpots(ref.current, assets, size, sel.spots.map((s) => ({ ...s, color: sideColor(sel.side), r: 4 })), callouts !== "off");
   }, [assets, sel, size, callouts]);
   if (!sel) return null;
   const dpr = window.devicePixelRatio || 1;

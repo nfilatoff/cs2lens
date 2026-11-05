@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { go } from "../App";
-import { drawCallouts } from "../callouts";
+import { drawCallouts, type CalloutMode } from "../callouts";
+import { CalloutModeSwitch } from "../components/CalloutToggle";
 import { mapPretty } from "../components/MatchPicker";
 import { t, td } from "../i18n";
 import { drawRadar, levelLabel, useMapAssets, type MapAssets } from "../radar";
@@ -9,14 +10,14 @@ import { drawRadar, levelLabel, useMapAssets, type MapAssets } from "../radar";
 // the order of the list: from the sites outwards
 const GROUPS = ["A", "A_approach", "B", "B_approach", "mid", "t_spawn", "ct_spawn"];
 
-function draw(canvas: HTMLCanvasElement, assets: MapAssets, size: number, highlight: string | null) {
+function draw(canvas: HTMLCanvasElement, assets: MapAssets, size: number, highlight: string | null, mode: CalloutMode) {
   const { meta, images } = assets;
   const ctx = canvas.getContext("2d")!;
   const dpr = window.devicePixelRatio || 1;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   meta.levels.forEach((_, li) => {
     drawRadar(ctx, images[li], li * size, size);
-    drawCallouts(ctx, meta, li, li * size, size, { highlight });
+    drawCallouts(ctx, meta, li, li * size, size, { highlight, mode });
     if (meta.levels.length > 1) {
       ctx.fillStyle = "#fff";
       ctx.font = "13px sans-serif";
@@ -32,6 +33,8 @@ export function CalloutsPage({ map }: { map?: string }) {
   const [maps, setMaps] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<string | null>(null);
+  // its own switch: with the shared one off, this page would show nothing to learn from
+  const [mode, setMode] = useState<CalloutMode>("full");
   useEffect(() => {
     api.maps().then(setMaps).catch((e: Error) => setError(e.message));
   }, []);
@@ -42,8 +45,8 @@ export function CalloutsPage({ map }: { map?: string }) {
   const n = ready?.meta.levels.length ?? 1;
   const size = Math.min(n > 1 ? 640 : 860, Math.floor((window.innerWidth - (n > 1 ? 140 : 420)) / n));
   useEffect(() => {
-    if (ref.current && ready) draw(ref.current, ready, size, highlight);
-  }, [ready, size, highlight]);
+    if (ref.current && ready) draw(ref.current, ready, size, highlight, mode);
+  }, [ready, size, highlight, mode]);
   const groups = useMemo(() => {
     const byGroup = new Map<string, Set<string>>();
     for (const z of ready?.meta.zones ?? []) {
@@ -63,6 +66,7 @@ export function CalloutsPage({ map }: { map?: string }) {
         <span className="seg wrap">
           {maps.map((m) => <button key={m} className={m === active ? "on" : ""} onClick={() => go("callouts", m)}>{mapPretty(m)}</button>)}
         </span>
+        <CalloutModeSwitch mode={mode} onChange={setMode} />
       </div>
       {!ready ? <div>{t("common.loading")}</div> : (
         <div className="callouts">

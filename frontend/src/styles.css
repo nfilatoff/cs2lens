@@ -409,6 +409,7 @@ code.console { font-size: 11px; background: var(--bg); border: 1px solid var(--l
 .zone-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 10px; }
 .zone-chips span { background: var(--panel3); border-radius: 4px; padding: 1px 7px; font-size: 12px; color: #cfcfcf; }
 .similar-list { margin: 8px 0; }
+.callout-switch { display: inline-flex; gap: 6px; align-items: center; }
 .callouts { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
 .callouts canvas { border-radius: 8px; border: 1px solid var(--line); max-width: 100%; }
 .callout-list { flex: 1; min-width: 240px; }

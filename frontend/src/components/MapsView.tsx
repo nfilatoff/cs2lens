@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type MatchOverview, type Movement, type MovementFilter, type Points, type Row } from "../api";
 import { go } from "../App";
-import { drawCallouts, useCallouts } from "../callouts";
+import { drawCallouts, useCalloutMode } from "../callouts";
 import { GRID, PALETTES, add, drawHeat, newGrid, type HeatOptions } from "../heat";
 import { drawRadar, levelLabel, levelOf, sideShort, useMapAssets, worldToPx, type MapAssets } from "../radar";
 import { t, td, type Key } from "../i18n";
@@ -206,7 +206,7 @@ export function HeatmapPanel({ source }: { source: HeatSource }) {
   });
   const [types, setTypes] = useState<Record<string, boolean>>({ smoke: true, flash: true, he: true, molotov: true });
   const [view, setView] = useState<Omit<View, "callouts">>({ radius: 7, palette: "inferno", opacity: 0.85, scale: "log", dots: false });
-  const callouts = useCallouts();
+  const callouts = useCalloutMode();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mode = MODES.find((m) => m.key === modeKey)!;
   const set = (patch: Partial<Filters>) => setF((cur) => ({ ...cur, ...patch }));
@@ -254,7 +254,7 @@ export function HeatmapPanel({ source }: { source: HeatSource }) {
   const n = assets?.meta.levels.length ?? 1;
   const size = Math.min(760, Math.floor((window.innerWidth - 80) / n));
   useEffect(() => {
-    if (canvasRef.current && assets) render(canvasRef.current, assets, mode, rows, movement, size, { ...view, callouts });
+    if (canvasRef.current && assets) render(canvasRef.current, assets, mode, rows, movement, size, { ...view, callouts: callouts !== "off" });
   }, [assets, mode, rows, movement, size, view, callouts]);
 
   if (error || mapError) return <div className="error">{error ?? mapError}</div>;

@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type CS2Status, type Lineup, type MatchOverview, type Throw, type Throws } from "../api";
 import { download } from "../clipExport";
-import { drawCallouts, useCallouts } from "../callouts";
+import { drawCallouts, useCalloutMode } from "../callouts";
 import { CalloutToggle } from "./CalloutToggle";
 import { drawRadar, levelLabel, levelOf, sideColor, sideShort, useMapAssets, worldToPx, type MapAssets } from "../radar";
 import { MatchPicker } from "./MatchPicker";
@@ -261,9 +261,9 @@ export function LineupsView({ initial, scope }: { initial?: MatchOverview; scope
 
   const n = assets?.meta.levels.length ?? 1;
   const size = Math.min(720, Math.floor((window.innerWidth - 480) / n));
-  const callouts = useCallouts();
+  const callouts = useCalloutMode();
   useEffect(() => {
-    if (canvasRef.current && assets) drawLineups(canvasRef.current, assets, groups, selected, size, callouts);
+    if (canvasRef.current && assets) drawLineups(canvasRef.current, assets, groups, selected, size, callouts !== "off");
   }, [assets, groups, selected, size, callouts]);
 
   const pickAt = (e: React.MouseEvent<HTMLCanvasElement>) => {
