@@ -53,6 +53,25 @@ def test_pool_configs_exist_and_are_complete():
     assert load_map_config("de_nosuchmap") is None
 
 
+@pytest.mark.parametrize(
+    ("map_name", "expected"),
+    [
+        ("de_cache", {"Truck": "A", "Long A": "A_approach", "Heaven": "B", "Sun Room": "B_approach", "Sandbags": "mid", "T Yard": "t_spawn", "Bus Stop": "ct_spawn"}),
+        ("de_nuke", {"Hell": "A", "Trophy": "A_approach", "Vents": "B", "Tunnels": "B_approach", "Silo": "mid"}),
+    ],
+)
+def test_configs_built_from_demos(map_name, expected):
+    cfg = load_map_config(map_name)
+    assert cfg.source.startswith("derived")
+    assert expected.items() <= {z.name: z.group for z in cfg.zones}.items()
+
+
+def test_nuke_sites_are_on_different_levels():
+    cfg = load_map_config("de_nuke")
+    # the same spot of the map: A upstairs, B below it
+    assert cfg.site_of([650, 650], [-900, -900], [-400, -760]) == ["A", "B"]
+
+
 def test_plants_fall_in_their_site(dust2_mini):
     cfg = load_map_config("de_dust2")
     plants = pl.read_parquet(dust2_mini / "bomb.parquet").filter(pl.col("event") == "finish_plant")
