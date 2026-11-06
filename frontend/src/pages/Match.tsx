@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, radarUrl, type MatchOverview, type TacticsResult, type TimelineRound } from "../api";
+import { api, radarUrl, type MatchOverview, type ScoutTeam, type TacticsResult, type TimelineRound } from "../api";
 import { go } from "../App";
 import { DataTable } from "../components/DataTable";
 import { ReplayView } from "../components/Replay";
@@ -17,12 +17,12 @@ const TABS: [string, Key][] = [
   ["replay", "tab.replay"],
   ["maps", "tab.maps"],
   ["highlights", "tab.highlights"],
+  ["clip", "tab.clip"],
 ];
 const MORE_TABS: [string, Key][] = [
   ["players", "tab.players"],
   ["tactics", "tab.tactics"],
   ["lineups", "tab.lineups"],
-  ["clip", "tab.clip"],
 ];
 
 /** How a round ended, in words. */
@@ -38,6 +38,10 @@ export function MatchPage({ id, tab, round, at }: { id: string; tab: string; rou
     setMatch(null);
     api.match(id).then(setMatch).catch((e: Error) => setError(e.message));
   }, [id]);
+  const [known, setKnown] = useState<ScoutTeam[]>([]);
+  useEffect(() => {
+    api.teams().then((d) => setKnown(d.teams)).catch(() => {});
+  }, []);
 
   if (error) return <div className="page error">{error}</div>;
   if (!match) return <div className="page">{t("match.loading")}</div>;
@@ -55,13 +59,13 @@ export function MatchPage({ id, tab, round, at }: { id: string; tab: string; rou
         <div className="mhero-main">
           {teams.length === 2 ? (
             <>
-              <div className="mteam a">{teams[0][0]}</div>
+              <div className="mteam a"><TeamLink raw={teams[0][0]} map={match.map} known={known} /></div>
               <div className="mscore">
                 <span className={scoreClass(teams[0][1], teams[1][1])}>{teams[0][1]}</span>
                 <span className="vs">:</span>
                 <span className={scoreClass(teams[1][1], teams[0][1])}>{teams[1][1]}</span>
               </div>
-              <div className="mteam b">{teams[1][0]}</div>
+              <div className="mteam b"><TeamLink raw={teams[1][0]} map={match.map} known={known} /></div>
             </>
           ) : (
             <div className="mteam">{teams.map(([t, s]) => `${t} ${s}`).join(" · ")}</div>
@@ -100,6 +104,13 @@ export function MatchPage({ id, tab, round, at }: { id: string; tab: string; rou
       {tab === "highlights" && <HighlightsView match={match} round={round} at={at} />}
     </div>
   );
+}
+
+/** A team's name in a demo, leading to its dossier on this map; the dossier may know it under an alias. */
+function TeamLink({ raw, map, known }: { raw: string; map: string; known: ScoutTeam[] }) {
+  const name = known.find((team) => team.raw.includes(raw))?.name;
+  if (!name) return <>{raw}</>;
+  return <a href={`#/scout/${encodeURIComponent(name)}/${encodeURIComponent(map)}`} title={t("match.openScout", { team: name })}>{raw}</a>;
 }
 
 function RoundStrip({ match }: { match: MatchOverview }) {

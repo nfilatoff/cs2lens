@@ -215,6 +215,8 @@ tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .mhero-main { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 28px; margin-top: 18px; }
 .mteam { font: 700 28px/1.1 var(--head); text-transform: uppercase; overflow-wrap: anywhere; }
 .mteam.a { text-align: right; }
+.mteam a { color: inherit; }
+.mteam a:hover { color: var(--accent); }
 .mscore { display: flex; align-items: center; gap: 16px; font: 700 54px/1 var(--head); font-variant-numeric: tabular-nums; }
 .mscore .vs { font-size: 28px; color: var(--muted); }
 .mscore .win { color: var(--accent); text-shadow: 0 0 28px rgba(255, 85, 0, 0.45); }

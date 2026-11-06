@@ -638,7 +638,9 @@ export function ClipView({ initial, scope }: { initial?: MatchOverview; scope?: 
   useEffect(() => {
     if (matchIds.some((id) => !overviews.has(id))) return; // keep the choice while matches load
     if (subject && (subject.kind === "team" ? teams.includes(subject.team) : roster.some((p) => p.steamid === subject.steamid))) return;
-    setSubject(roster[0] ? { kind: "player", steamid: roster[0].steamid } : teams[0] ? { kind: "team", team: teams[0] } : null);
+    // a real player of the match: bots are in the roster too, without a team of the match
+    const first = roster.find((p) => teams.includes(p.team));
+    setSubject(first ? { kind: "player", steamid: first.steamid } : teams[0] ? { kind: "team", team: teams[0] } : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roster, teams, subject]);
 
