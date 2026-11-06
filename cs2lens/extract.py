@@ -7,8 +7,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 import polars as pl
-from awpy import Demo
+from awpy import Demo, InvalidDemoError
 
+from cs2lens.demorepair import repair_demo
+
+REPAIRED_FILE = "_repaired.dem"  # a temporary copy, for a demo the parser refuses (see demorepair.py)
 REPLAY_EVERY = 4  # ticks between replay frames (16 per second at 64 tick)
 REPLAY_COLUMNS = [
     "tick", "steamid", "name", "side", "x", "y", "z", "yaw", "health", "armor", "has_helmet", "has_defuser",
@@ -46,17 +49,47 @@ def extract(
     ``progress(fraction, stage)`` is called between stages.
     """
     progress = progress or _noop
-    demo = Demo(demo_path)
     out = Path(out_dir)
     (out / "events").mkdir(parents=True, exist_ok=True)
+    repaired = out / REPAIRED_FILE
+    try:
+        return _extract(demo_path, out, repaired, snapshot_seconds, replay_every, progress)
+    finally:
+        try:
+            repaired.unlink(missing_ok=True)
+        except OSError:  # the parser may still hold the file; it does no harm until the next run
+            pass
 
-    progress(0.0, "parsing demo")
+
+def _load(demo_path: str | Path, repaired: Path, progress: Progress) -> tuple[Demo, int]:
+    """The demo with all datasets loaded and how many broken strings had to be repaired for that."""
+    demo = Demo(demo_path)
+    try:
+        demo.load(*Demo.available_datasets())
+        return demo, 0
+    except InvalidDemoError as e:
+        if "not UTF-8" not in str(e):
+            raise
+        progress(0.0, "repairing demo")
+        count = repair_demo(demo_path, repaired)
+        if not count:
+            raise
+    demo = Demo(repaired)
     demo.load(*Demo.available_datasets())
+    return demo, count
+
+
+def _extract(
+    demo_path: str | Path, out: Path, repaired: Path, snapshot_seconds: float, replay_every: int, progress: Progress,
+) -> dict:
+    progress(0.0, "parsing demo")
+    demo, repaired_strings = _load(demo_path, repaired, progress)
     manifest: dict = {
         "header": demo.header,
         "tick_rate": demo.tick_rate,
         "demo_path": str(Path(demo_path).resolve()),
         "replay_every": replay_every,
+        "repaired_strings": repaired_strings,
         "tables": {},
     }
 
