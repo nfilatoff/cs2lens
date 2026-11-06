@@ -39,7 +39,8 @@ SESSION_CVARS = {
 
 def default_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
-    return Path(base) / "cs2lens" / "hlae"
+    # beside the project, not inside %LOCALAPPDATA%\cs2lens: install.ps1 clones into that folder and needs it empty
+    return Path(base) / "cs2lens-tools" / "hlae"
 
 
 def find_hlae(folder: Path | None = None) -> Path | None:

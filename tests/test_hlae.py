@@ -21,6 +21,12 @@ def test_ticks_of_a_clip():
     assert (c.start_tick, c.end_tick) == (1064, 1192)  # a second of preroll, then exactly the window
 
 
+def test_hlae_stays_out_of_the_install_folder(monkeypatch, tmp_path):
+    """install.ps1 clones into %LOCALAPPDATA%/cs2lens and can't do that if HLAE is already there."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert not hlae.default_dir().is_relative_to(tmp_path / "cs2lens")
+
+
 def test_launch_command(tmp_path):
     cmd = hlae.launch_command(tmp_path / "HLAE.exe", tmp_path / "game" / "csgo", "my_demo", 1920, 1080)
     args = cmd[cmd.index("-cmdLine") + 1]
